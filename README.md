@@ -152,6 +152,22 @@ for the 60 days to October 19 2026, the 10:15 AM opening-range scan, Yahoo's
 TSLA headlines that morning, the House Clerk's 2026 index, real PTR text and
 real XBRL facts. They reproduce every number in the example above.
 
+## Added in this fork: `/trader-journal`
+
+`/trader-journal` is my addition to this fork; it is not part of Jake
+Schincariol's original eleven. It is a Trade Journal: it logs each closed
+paper trade to `trader/journal.csv` (date, ticker, entry, stop, target,
+shares, exit price, profit or loss in dollars and in R, and a one-line note)
+and prints a weekly summary: number of trades, win rate, average R and the
+largest loss. It can take the ticker, entry, stop and target from
+`trader/plan.json`. Standard library only, like the rest of the pack, and it
+never places an order.
+
+```bash
+python3 trader-journal/journal.py log --from-plan --shares 8 --exit 370.04 --note "ORB, took 1R"
+python3 trader-journal/journal.py week                                 # this week, Monday to Sunday
+```
+
 ## Fine print
 
 **Not financial advice.** This is software that reads public data and does
