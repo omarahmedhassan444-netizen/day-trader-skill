@@ -1,4 +1,5 @@
 __pycache__/
 *.pyc
-# your own trading files: config, plans, orders, logs
-trader/
+# your own trading files: plans, orders, logs. The config is kept.
+trader/*
+!trader/config.json

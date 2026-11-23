@@ -42,7 +42,8 @@ class Repo(unittest.TestCase):
 
     def test_root_holds_only_the_pack(self):
         root = sorted(d for d in os.listdir(ROOT) if not d.startswith(".git"))
-        self.assertEqual(root, sorted([".claude-plugin", "LICENSE", "README.md", "tests"] + SKILLS))
+        self.assertEqual(root, sorted([".claude-plugin", "LICENSE", "README.md", "tests", "trader"] + SKILLS))
+        self.assertEqual(os.listdir(os.path.join(ROOT, "trader")), ["config.json"])
 
     def test_frontmatter_name_and_description(self):
         for s in SKILLS:
