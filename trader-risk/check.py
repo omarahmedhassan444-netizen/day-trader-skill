@@ -1,62 +1,61 @@
 #!/usr/bin/env python3
-"""Pre-trade risk check for trader-risk. Standard library only, no network.
+"""Pre-trade risk check for trader-risk: EGX edition. No network.
 
 Reads the proposed orders (trader/orders.json) and checks every one against
 your rules (trader/config.json), your account (trader/portfolio.json),
-prices (trader/prices.json) and what was placed today (trader/state/broker.json).
+prices (trader/prices.json) and what you entered today (trader/state/broker.json).
 Each order gets PASS or BLOCK with the reasons. Orders are checked in file
 order as if each PASS had filled, so buys that are fine one by one but break
-a limit together are caught.
+a limit together are caught. Amounts are Egyptian pounds (EGP).
 
     python3 check.py                                 # the trader/ files, writes trader/state/risk.json
-    python3 check.py --now "2026-10-19 10:15"        # pin the clock (New York time)
+    python3 check.py --now "2026-11-03 10:26"        # pin the clock (Cairo time)
     python3 check.py --orders trader/orders.json --json
     python3 check.py --no-write                      # check without recording the verdicts
 
-Entries and exits. An ENTRY opens or adds to a position (a buy, or a sell
-that would go short). An EXIT only reduces what you hold. Getting out must
-always be possible: an exit is checked for format, asset and short sales
-only; every other rule turns into a warning for it.
+Entries and exits. An ENTRY opens or adds to a position (a buy). An EXIT only
+reduces what you hold. Getting out must always be possible: an exit is checked
+for format, asset and short sales only; every other rule turns into a warning.
 
 What blocks an order (every order):
 
   format        missing symbol or side, both or neither of qty / notional,
-                notional on anything but a market day order (Alpaca's rule),
                 a limit order without a limit price, unknown type; a bracket
                 that is not whole shares, not day / gtc, or misses a leg
-  asset         options (OCC symbols) unless "allow_options": true; crypto
-                and anything that is not a stock or ETF
+  asset         options unless "allow_options": true; anything that is not a stock
   short         selling more than you hold, unless "allow_short": true
 
 What blocks an entry (on top):
 
   blocked       a ticker on your "blocked" list
-  size          under min_order_usd, over max_order_usd
+  size          under min_order_egp, over max_order_egp
   position      the stock would be over max_position_pct of the account
   cash          the buy would dip into your cash buffer, or need margin
   duplicate     the same symbol and side twice in this batch, or already
-                placed today (trader/state/broker.json)
-  daily limit   max_orders_per_day orders placed today
-  stop          no stop while "require_stop": true (a bracket stop_loss_stop_price
-                or the order's plan stop); a stop on the wrong side of the entry
-  loss          qty x (entry - stop) over max_loss_per_trade_usd. The entry is
+                entered today (trader/state/broker.json)
+  daily limit   max_orders_per_day orders entered today
+  stop          no stop while "require_stop": true; a stop on the wrong side
+  loss          qty x (entry - stop) over max_loss_per_trade_egp. The entry is
                 the limit price for a limit order, else the HIGHER of the plan's
                 entry and a fresh price (under 15 minutes old), so a stale plan
                 cannot understate the risk
   reward:risk   (target - entry) / (entry - stop) under min_reward_risk
   daily loss    the max losses at the stops of today's entries plus this one
-                over max_daily_loss_usd (win or lose, each counts in full)
-  trades        max_trades_per_day entries already placed today
-  window        before no_entries_before or after no_entries_after (New York
-                time), or the market is closed (weekend, NYSE holiday, outside
-                9:30 to the close; on a 1:00 p.m. early close the window ends
-                3 hours earlier too)
-  pdt           only with "pdt_guard": true: 3 day trades already in the last
-                5 business days (a 4th would trip the old pattern-day-trader rule)
+                over max_daily_loss_egp (win or lose, each counts in full)
+  trades        max_trades_per_day entries already entered today
+  window        before no_entries_before or after no_entries_after (Cairo
+                time), or EGX is closed (Friday, Saturday, an EGX holiday,
+                outside 10:00 to 14:30; on a short Ramadan session the window
+                ends an hour earlier too)
+  same-day      a buy of a stock that is not on your "same_day_list". EGX lets
+                you sell a stock the day you buy it only if it is on EGX's
+                intraday (T+0) trading list. With an empty list this is a
+                warning on every buy, so check the list on egx.com.eg.
 
-Exit code 0 when every order passes, 1 when any order is blocked.
-The verdicts go to trader/state/risk.json with a fingerprint of each order,
-so trader-broker only shows an order as ready if THIS exact order passed today.
+Not financial advice. Exit code 0 when every order passes, 1 when any order
+is blocked. The verdicts go to trader/state/risk.json with a fingerprint of
+each order, so trader-broker only shows an order as ready if THIS exact order
+passed today.
 """
 
 import argparse
@@ -67,13 +66,16 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trader-egx"))
+import egx_data as E  # noqa: E402
+
 DEFAULTS = {
-    "budget": None, "cash_buffer_pct": 10, "max_position_pct": 75, "max_order_usd": 4000,
-    "min_order_usd": 5, "max_loss_per_trade_usd": 50, "max_daily_loss_usd": 150, "max_trades_per_day": 3,
+    "budget": None, "cash_buffer_pct": 10, "max_position_pct": 75, "max_order_egp": 40000,
+    "min_order_egp": 50, "max_loss_per_trade_egp": 500, "max_daily_loss_egp": 1500, "max_trades_per_day": 3,
     "max_orders_per_day": 10, "min_reward_risk": 1.0, "require_stop": True,
-    "no_entries_before": "09:45", "no_entries_after": "15:30", "flat_by": "15:55",
-    "paper": True, "blocked": [], "allow_options": False, "allow_margin": False, "allow_short": False,
-    "pdt_guard": False,
+    "no_entries_before": "10:15", "no_entries_after": "14:00", "flat_by": "14:20",
+    "paper": True, "blocked": [], "same_day_list": [], "allow_options": False, "allow_margin": False,
+    "allow_short": False,
 }
 ALPACA_FIELDS = ("symbol", "side", "qty", "notional", "type", "time_in_force", "limit_price",
                  "stop_price", "trail_price", "trail_percent", "extended_hours", "client_order_id",
@@ -84,92 +86,38 @@ PRICE_FIELDS = ("qty", "notional", "limit_price", "stop_price", "take_profit_lim
 TYPES = {"market", "limit", "stop", "stop_limit", "trailing_stop"}
 TIFS = {"day", "gtc", "opg", "cls", "ioc", "fok"}
 OCC = re.compile(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$")
-TICKER = re.compile(r"^[A-Z]{1,5}([.\-][A-Z]{1,2})?$")
+TICKER = re.compile(r"^[A-Z][A-Z0-9]{0,5}([.\-][A-Z]{1,2})?$")
 HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 CENT = 0.005
 FRESH_MINUTES = 15
 REF_WORDS = {"plan": "the plan's entry", "price": "the latest price", "limit": "the limit price",
              "stop price": "the stop price", "stale price": "an old price"}
 
-NYSE_HOLIDAYS = {
-    "2026-01-01": "New Year's Day",
-    "2026-01-19": "Martin Luther King, Jr. Day",
-    "2026-02-16": "Washington's Birthday",
-    "2026-04-03": "Good Friday",
-    "2026-05-25": "Memorial Day",
-    "2026-06-19": "Juneteenth National Independence Day",
-    "2026-07-03": "Independence Day (observed)",
-    "2026-09-07": "Labor Day",
-    "2026-11-26": "Thanksgiving Day",
-    "2026-12-25": "Christmas Day",
-    "2027-01-01": "New Year's Day",
-    "2027-01-18": "Martin Luther King, Jr. Day",
-    "2027-02-15": "Washington's Birthday",
-    "2027-03-26": "Good Friday",
-    "2027-05-31": "Memorial Day",
-    "2027-06-18": "Juneteenth National Independence Day (observed)",
-    "2027-07-05": "Independence Day (observed)",
-    "2027-09-06": "Labor Day",
-    "2027-11-25": "Thanksgiving Day",
-    "2027-12-24": "Christmas Day (observed)",
-}
-NYSE_EARLY_CLOSE = {  # 1:00 p.m. ET
-    "2026-11-27": "day after Thanksgiving",
-    "2026-12-24": "Christmas Eve",
-    "2027-11-26": "day after Thanksgiving",
-}
-CALENDAR_YEARS = (2026, 2027)
-OPEN = datetime.time(9, 30)
-CLOSE = datetime.time(16, 0)
-EARLY = datetime.time(13, 0)
+OPEN = E.DEFAULT_OPEN
+CLOSE = E.DEFAULT_CLOSE
 
 
 class RiskError(Exception):
     pass
 
 
-# ---------------------------------------------------------------- time (New York, no tz files)
+# ---------------------------------------------------------------- time (Cairo, through trader-egx)
 
-def _nth_sunday(year, month, n):
-    d = datetime.date(year, month, 1)
-    d += datetime.timedelta(days=(6 - d.weekday()) % 7)
-    return d + datetime.timedelta(weeks=n - 1)
-
-
-def eastern_offset(utc):
-    """Hours from UTC for New York: -4 in daylight time, -5 otherwise.
-    DST runs from 2:00 a.m. on the second Sunday of March to 2:00 a.m. on the
-    first Sunday of November (US rule since 2007)."""
-    y = utc.year
-    start = datetime.datetime.combine(_nth_sunday(y, 3, 2), datetime.time(7, 0))   # 2:00 EST
-    end = datetime.datetime.combine(_nth_sunday(y, 11, 1), datetime.time(6, 0))    # 2:00 EDT
-    naive = utc.replace(tzinfo=None)
-    return -4 if start <= naive < end else -5
-
-
-def to_eastern(utc):
-    return utc.replace(tzinfo=None) + datetime.timedelta(hours=eastern_offset(utc))
-
-
-def eastern_to_utc(local):
-    for off in (-4, -5):
-        utc = local - datetime.timedelta(hours=off)
-        if eastern_offset(utc) == off:
-            return utc
-    return local + datetime.timedelta(hours=5)
+to_local = E.to_cairo
+local_to_utc = E.cairo_to_utc
 
 
 def parse_now(text):
-    """ISO time -> naive UTC. A time without an offset is taken as New York time."""
+    """ISO time -> naive UTC. A time without an offset is taken as Cairo time."""
     if not text:
         return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0, tzinfo=None)
     t = text.strip().replace("Z", "+00:00")
     try:
         dt = datetime.datetime.fromisoformat(t)
     except ValueError:
-        raise RiskError("--now wants a time like \"2026-10-19 10:15\" (New York) or ...Z (UTC)")
+        raise RiskError("--now wants a time like \"2026-11-03 10:25\" (Cairo) or ...Z (UTC)")
     if dt.tzinfo is None:
-        return eastern_to_utc(dt)
+        return local_to_utc(dt)
     return (dt - dt.utcoffset()).replace(tzinfo=None)
 
 
@@ -186,13 +134,8 @@ def parse_utc(text):
 
 
 def trading_day(d):
-    """(is_trading_day, reason). Weekends and the NYSE holiday list."""
-    if d.weekday() >= 5:
-        return False, "weekend"
-    name = NYSE_HOLIDAYS.get(d.isoformat())
-    if name:
-        return False, "NYSE holiday: " + name
-    return True, ""
+    """(is_trading_day, reason): EGX trades Sunday to Thursday, minus its holidays."""
+    return E.trading_day(d)
 
 
 def hhmm(value, key):
@@ -201,7 +144,7 @@ def hhmm(value, key):
         return None
     m = HHMM.match(str(value).strip())
     if not m:
-        raise RiskError("%s must be a New York time like \"09:45\", got %r" % (key, value))
+        raise RiskError("%s must be a Cairo time like \"10:15\", got %r" % (key, value))
     return datetime.time(int(m.group(1)), int(m.group(2)))
 
 
@@ -211,39 +154,41 @@ def _shift(t, hours):
 
 
 def window_check(now_et, c):
-    """Reasons an entry cannot be placed now (New York time). Empty when the window is off."""
+    """Reasons an entry cannot be placed now (Cairo time). Empty when the window is off."""
     before = hhmm(c.get("no_entries_before"), "no_entries_before")
     after = hhmm(c.get("no_entries_after"), "no_entries_after")
     if before is None and after is None:
         return [], []
     warns = []
     d, t = now_et.date(), now_et.time().replace(second=0, microsecond=0)
-    if d.year not in CALENDAR_YEARS:
-        warns.append("the holiday list covers %s only: check nyse.com for %s"
-                     % (" and ".join(map(str, CALENDAR_YEARS)), d.isoformat()))
+    if not E.calendar_known(d):
+        warns.append("the EGX holiday list does not cover %s yet: run egx_data.py calendar --refresh and "
+                     "check egx.com.eg" % d.isoformat())
     ok, why = trading_day(d)
     stamp = now_et.strftime("%a %Y-%m-%d %H:%M")
     if not ok:
-        return ["window: the market is closed today (%s, %s New York)" % (why, stamp)], warns
-    close = EARLY if d.isoformat() in NYSE_EARLY_CLOSE else CLOSE
-    if t < OPEN or now_et.time() >= close:
-        return ["window: the market is closed (%s New York; the session is %s to %s)"
-                % (stamp, OPEN.strftime("%H:%M"), close.strftime("%H:%M"))], warns
-    if close == EARLY and after is not None:
-        after = _shift(after, 3)
-        warns.append("early close at 1:00 p.m. today (%s): no new entries after %s"
-                     % (NYSE_EARLY_CLOSE[d.isoformat()], after.strftime("%H:%M")))
+        return ["window: EGX is closed today (%s, %s Cairo)" % (why, stamp)], warns
+    open_t, close = E.session(d)
+    if t < open_t or now_et.time() >= close:
+        return ["window: EGX is closed (%s Cairo; the session is %s to %s)"
+                % (stamp, open_t.strftime("%H:%M"), close.strftime("%H:%M"))], warns
+    if close < CLOSE and after is not None:
+        moved = (datetime.datetime.combine(d, after) - (datetime.datetime.combine(d, CLOSE) -
+                                                          datetime.datetime.combine(d, close))).time()
+        after = moved
+        warns.append("short session today (EGX closes %s): no new entries after %s"
+                     % (close.strftime("%H:%M"), after.strftime("%H:%M")))
     if before is not None and t < before:
-        return ["window: no new entries before %s New York (it is %s)" % (before.strftime("%H:%M"),
-                                                                          t.strftime("%H:%M"))], warns
+        return ["window: no new entries before %s Cairo (it is %s)" % (before.strftime("%H:%M"),
+                                                                       t.strftime("%H:%M"))], warns
     if after is not None and t > after:
-        return ["window: no new entries after %s New York (it is %s)" % (after.strftime("%H:%M"),
-                                                                         t.strftime("%H:%M"))], warns
+        return ["window: no new entries after %s Cairo (it is %s)" % (after.strftime("%H:%M"),
+                                                                      t.strftime("%H:%M"))], warns
     return [], warns
 
 
 def business_days(today, n=5):
-    """The last n NYSE trading days up to and including today, newest first."""
+    """The last n EGX trading days up to and including today, newest first."""
     out, d = [], today
     for _ in range(40):
         if trading_day(d)[0]:
@@ -283,16 +228,19 @@ def _f(x):
 
 
 def money(x):
-    return "$" + "{:,.2f}".format(float(x)).replace(".00", "")
+    return "EGP " + "{:,.2f}".format(float(x)).replace(".00", "")
 
 
 def _cent(x):
-    """A price to the cent, half up (366.475 -> 366.48)."""
-    return int(float(x) * 100 + 0.5 + 1e-9) / 100.0
+    """A price to the EGX step, half up: 122.415 -> 122.42; under 1 EGP to the thousandth."""
+    sc = 1000 if 0 < float(x) < 1 else 100
+    return int(float(x) * sc + 0.5 + 1e-9) / float(sc)
 
 
-def _p(x):
-    return "%.2f" % float(x)
+def _p(x, ref=None):
+    """A price for people; with ref, the step follows the stock's price (0.66 risk on 122.41)."""
+    base = float(ref if ref is not None else x)
+    return ("%.3f" if 0 < abs(base) < 1 else "%.2f") % float(x)
 
 
 def account(cfg, portfolio, prices):
@@ -373,13 +321,16 @@ def day_trades(state, today):
 def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=None, price_times=None):
     """Pure function. Returns {"results": [...], "pass": n, "block": n, "warnings": [...]}.
 
-    now          naive UTC (default: the real clock); its New York date is "today"
+    now          naive UTC (default: the real clock); its Cairo date is "today"
     price_times  {SYM: naive UTC time of that price}; None = every price counts as fresh"""
     c = dict(DEFAULTS)
+    for k, v in (cfg or {}).items():      # older configs say *_usd: the amounts are EGP here
+        if k.endswith("_" + "usd") and k[:-4] + "_egp" not in (cfg or {}):
+            c[k[:-4] + "_egp"] = v
     c.update(cfg or {})
     prices = {str(k).upper(): float(v) for k, v in (prices or {}).items() if _f(v)}
     now_utc = now or parse_now(None)
-    now_et = to_eastern(now_utc)
+    now_et = to_local(now_utc)
     today = today or now_et.date().isoformat()
     acct, top_warn = account(c, portfolio, prices)
     blocked = {str(b).upper() for b in c.get("blocked") or []}
@@ -396,7 +347,6 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
             loss_today += ml
     placed_keys = {(str(r.get("symbol", "")).upper(), r.get("side")) for r in done_today}
     win_reasons, win_warns = window_check(now_et, c)
-    pdt_n, pdt_list = day_trades(state, today) if c.get("pdt_guard") else (0, [])
     seen = set()
     results = []
     batch_entries, batch_loss = 0, 0.0
@@ -531,25 +481,25 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
         if sym in blocked:
             later.append("blocked: %s is on your blocked list" % sym)
         if value is not None:
-            if value < float(c.get("min_order_usd") or 0) - CENT:
+            if value < float(c.get("min_order_egp") or 0) - CENT:
                 later.append("size: %s is under your %s minimum order"
-                             % (money(value), money(c["min_order_usd"])))
-            if c.get("max_order_usd") and value > float(c["max_order_usd"]) + CENT:
+                             % (money(value), money(c["min_order_egp"])))
+            if c.get("max_order_egp") and value > float(c["max_order_egp"]) + CENT:
                 later.append("size: %s is over your %s max order"
-                             % (money(value), money(c["max_order_usd"])))
+                             % (money(value), money(c["max_order_egp"])))
 
         # account effects, simulated in order
         cash = acct["cash"]
         total = cash + sum(acct["values"].values())
-        buffer_usd = total * float(c.get("cash_buffer_pct") or 0) / 100.0
+        buffer_egp = total * float(c.get("cash_buffer_pct") or 0) / 100.0
         if value is not None and side == "buy" and kind == "entry":
             after_cash = cash - value
             if after_cash < -CENT and not c.get("allow_margin"):
                 later.append("cash: needs %s but only %s cash; that would be margin (borrowed money)"
                              % (money(value), money(cash)))
-            elif after_cash < buffer_usd - CENT:
+            elif after_cash < buffer_egp - CENT:
                 later.append("cash: leaves %s cash, under your %s%% buffer of %s"
-                             % (money(max(after_cash, 0)), _pct(c["cash_buffer_pct"]), money(buffer_usd)))
+                             % (money(max(after_cash, 0)), _pct(c["cash_buffer_pct"]), money(buffer_egp)))
             pos_after = held_value + value
             limit = total * float(c.get("max_position_pct") or 100) / 100.0
             if total > 0 and pos_after > limit + CENT:
@@ -567,7 +517,7 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                 reasons.append("short: selling more %s than you hold (%s shares); short selling is off. "
                                "If you bought it, record the fill first (ticket.py fill)" % (sym, _num(held)))
 
-        # day-trade checks: stop, loss, reward:risk, daily loss, trades, window, pdt
+        # day-trade checks: stop, loss, reward:risk, daily loss, trades, window, same-day
         max_loss = risk_ps = rr = stop = target = None
         if kind == "entry" and side in ("buy", "sell"):
             long = side == "buy"
@@ -582,7 +532,7 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                              "(trader-alerts: alerts.py add --from-plan)" % _p(stop))
             if not stop:
                 if c.get("require_stop", True):
-                    later.append("stop: no stop. Every entry needs one (\"require_stop\": true): a bracket "
+                    later.append("stop: no stop. Every entry needs one (\"require_stop\": true): a "
                                  "stop_loss_stop_price, from trader-exit and trader-budget")
                 else:
                     warns.append("no stop: the max loss is not capped, so it is not counted in the daily loss")
@@ -591,28 +541,29 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                     later.append("stop: the stop %s must be %s the entry %s for a %s"
                                  % (_p(stop), "below" if long else "above", _p(ref), side))
                 else:
-                    risk_c = int(round(abs(ref - stop) * 100))
-                    risk_ps = risk_c / 100.0
+                    sc = 1000 if ref < 1 else 100     # EGX steps: 0.001 under 1 EGP
+                    risk_c = int(round(abs(ref - stop) * sc))
+                    risk_ps = risk_c / float(sc)
                     shares = q if q is not None else ((value or 0) / ref)
                     max_loss = round(shares * risk_ps, 2)
-                    cap = _f(c.get("max_loss_per_trade_usd"))
+                    cap = _f(c.get("max_loss_per_trade_egp"))
                     if cap and max_loss > cap + CENT:
                         later.append("loss: %s shares x %s risk a share = %s at the stop, over your %s max loss "
-                                     "per trade" % (_num(shares), _p(risk_ps), money(max_loss), money(cap)))
+                                     "per trade" % (_num(shares), _p(risk_ps, ref), money(max_loss), money(cap)))
                     min_rr = _f(c.get("min_reward_risk"))
                     if target:
                         if (long and target <= ref + CENT) or (not long and target >= ref - CENT):
                             later.append("target: the target %s must be %s the entry %s"
                                          % (_p(target), "above" if long else "below", _p(ref)))
                         else:
-                            rr = round(int(round(abs(target - ref) * 100)) / float(risk_c), 2)
+                            rr = round(int(round(abs(target - ref) * sc)) / float(risk_c), 2)
                             if min_rr and rr < min_rr - 1e-9:
                                 later.append("reward:risk: %.2f (target %s, entry %s, stop %s) is under your "
                                              "minimum %s" % (rr, _p(target), _p(ref), _p(stop), _num(min_rr)))
                     elif min_rr:
                         later.append("reward:risk: no target to measure it against (min_reward_risk %s)"
                                      % _num(min_rr))
-            daily = _f(c.get("max_daily_loss_usd"))
+            daily = _f(c.get("max_daily_loss_egp"))
             if daily and max_loss is not None:
                 used = loss_today + batch_loss
                 if used + max_loss > daily + CENT:
@@ -624,17 +575,22 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                 later.append("trades: %d entries placed today plus %d passed earlier in this batch, your limit "
                              "is %d a day" % (len(entries_today), batch_entries, cap_t))
             later.extend(win_reasons)
-            if c.get("pdt_guard") and pdt_n >= 3:
-                later.append("pdt: %d day trades in the last 5 business days (%s); a 4th trips the "
-                             "pattern-day-trader rule your broker applies (\"pdt_guard\": true)"
-                             % (pdt_n, ", ".join(pdt_list)))
+            same_day = [str(x).upper() for x in (c.get("same_day_list") or [])]
+            if long and same_day and sym not in same_day:
+                later.append("same-day: %s is not on your same_day_list. EGX lets you sell a stock the day you "
+                             "buy it only if it is on EGX's intraday (T+0) trading list, so this day trade "
+                             "could not be closed today. Check the list on egx.com.eg or with your broker" % sym)
+            elif long and not same_day:
+                warns.append("same-day: check that %s is on EGX's intraday (T+0) trading list before you buy: "
+                             "only those stocks can be sold the same day. Put the list in \"same_day_list\" "
+                             "and this check becomes a block" % sym)
             if stop and ref and risk_ps:
                 info.append("entry %s (%s), stop %s, target %s: risk %s a share"
                             % (_p(ref), REF_WORDS.get(ref_from, ref_from), _p(stop),
-                               _p(target) if target else "none", _p(risk_ps)))
+                               _p(target) if target else "none", _p(risk_ps, ref)))
                 info.append("max loss %s%s, reward:risk %s%s"
-                            % (money(max_loss), (" (limit %s)" % money(c["max_loss_per_trade_usd"]))
-                               if _f(c.get("max_loss_per_trade_usd")) else "",
+                            % (money(max_loss), (" (limit %s)" % money(c["max_loss_per_trade_egp"]))
+                               if _f(c.get("max_loss_per_trade_egp")) else "",
                                ("%.2f" % rr) if rr is not None else "n/a",
                                (" (min %s)" % _num(c["min_reward_risk"])) if _f(c.get("min_reward_risk")) else ""))
             if daily or cap_t:
@@ -684,7 +640,7 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
         results.append({
             "index": i, "symbol": sym, "side": side, "kind": kind,
             "amount": money(_f(notional) or 0) if notional is not None else ("%s shares" % qty),
-            "value_usd": round(value, 2) if value is not None else None,
+            "value_egp": round(value, 2) if value is not None else None,
             "entry_ref": round(ref, 2) if ref else None, "entry_ref_from": ref_from,
             "stop": stop, "target": target, "risk_per_share": risk_ps, "max_loss": max_loss,
             "reward_risk": rr, "fingerprint": fingerprint(o), "verdict": verdict,
@@ -701,7 +657,7 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
         "warnings": top_warn,
         "cash_after": round(acct["cash"], 2),
         "today": {"orders_placed": count_today, "entries_placed": len(entries_today),
-                  "loss_at_risk": round(loss_today, 2), "day_trades_5d": pdt_n if c.get("pdt_guard") else None},
+                  "loss_at_risk": round(loss_today, 2)},
     }
 
 
@@ -731,13 +687,13 @@ def report(res):
         for x in r["warnings"]:
             lines.append("        ~ " + x)
     lines.append("")
-    lines.append("%d passed, %d blocked at %s New York. Cash after the passed orders: %s (%s account)."
+    lines.append("%d passed, %d blocked at %s Cairo. Cash after the passed orders: %s (%s account)."
                  % (res["pass"], res["block"], res["now_new_york"], money(res["cash_after"]),
                     "paper" if res["paper"] else "LIVE"))
     if res["block"]:
         lines.append("Blocked orders do not go to the broker. Fix the order or your rules, then check again.")
     else:
-        lines.append("Every order passed. trader-broker still asks you yes or no for each one.")
+        lines.append("Every order passed. trader-broker prints each ticket; you enter it yourself in your broker app.")
     lines.append("Education and tooling, not financial advice.")
     return "\n".join(lines)
 
@@ -773,8 +729,8 @@ def main(argv=None):
                     help="your account; if missing, a fresh account funded with the budget")
     ap.add_argument("--prices", default="trader/prices.json")
     ap.add_argument("--state", default="trader/state/broker.json", help="what trader-broker placed today")
-    ap.add_argument("--now", help="pretend it is this New York time, e.g. \"2026-10-19 10:15\"")
-    ap.add_argument("--today", help="YYYY-MM-DD (default: today in New York)")
+    ap.add_argument("--now", help="pretend it is this Cairo time, e.g. \"2026-11-03 10:26\"")
+    ap.add_argument("--today", help="YYYY-MM-DD (default: today in Cairo)")
     ap.add_argument("--out", default="trader/state/risk.json", help="where the verdicts are recorded")
     ap.add_argument("--no-write", action="store_true", help="do not record the verdicts")
     ap.add_argument("--json", action="store_true")
