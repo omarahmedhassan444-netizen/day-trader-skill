@@ -181,7 +181,7 @@ class Watch(unittest.TestCase):
         try:
             out_path = os.path.join(tmp, "entry.json")
             code, out, err = run(["watch", "COMI", "--offline", COMI, "--now", "2026-11-03 09:55",
-                                  "--out", out_path])
+                                  "--out", out_path, "--no-notify"])
             self.assertEqual(code, 0, err)
             lines = out.splitlines()
             ready = next(i for i, l in enumerate(lines) if "GET READY" in l)
@@ -198,7 +198,7 @@ class Watch(unittest.TestCase):
 
     def test_replay_without_warning_is_late(self):
         code, out, _ = run(["watch", "COMI", "--offline", COMI, "--now", "2026-11-03 09:55",
-                            "--near-pct", "0", "--out", os.path.join(tempfile.mkdtemp(), "e.json")])
+                            "--near-pct", "0", "--out", os.path.join(tempfile.mkdtemp(), "e.json"), "--no-notify"])
         self.assertEqual(code, 0)
         self.assertIn("LATE: no GET READY 5+ minutes before this trigger", out)
 

@@ -818,6 +818,61 @@ def headlines(sym=None):
     return parse_news(_http(news_url(sym)))
 
 
+# ---------------------------------------------------------------- notifications (Mac sound + phone)
+
+NTFY_HOST = "ntfy.sh"
+
+
+def notify_settings(cfg):
+    """From trader/config.json: "notify_mac" (true), "notify_sound" ("Glass"), "notify_ntfy_topic" (none)."""
+    cfg = cfg or {}
+    return {"mac": cfg.get("notify_mac", True), "sound": str(cfg.get("notify_sound") or "Glass"),
+            "topic": str(cfg.get("notify_ntfy_topic") or "").strip()}
+
+
+def _applescript_text(s):
+    return '"%s"' % str(s).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def notify(title, body, cfg=None, urgent=False, _run=None, _open=None):
+    """Ring an alert: a macOS notification with a sound, and a push to your phone through ntfy
+    (https://ntfy.sh/<your topic>) when "notify_ntfy_topic" is set. One attempt each, never raises.
+    -> (sent: list of channel names, errors: list of strings)"""
+    st = notify_settings(cfg)
+    sent, errors = [], []
+    if st["mac"] and sys.platform == "darwin":
+        import subprocess
+        run = _run or subprocess.run
+        script = "display notification %s with title %s sound name %s" % (
+            _applescript_text(body[:240]), _applescript_text(title[:80]), _applescript_text(st["sound"]))
+        try:
+            run(["osascript", "-e", script], check=True, timeout=10,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            sent.append("mac")
+        except Exception as e:
+            errors.append("Mac notification failed: %s" % e)
+    if st["topic"]:
+        if not re.match(r"^[A-Za-z0-9_-]{8,64}$", st["topic"]):
+            errors.append("notify_ntfy_topic must be 8 to 64 letters, digits, - or _")
+        else:
+            req = urllib.request.Request("https://%s/%s" % (NTFY_HOST, st["topic"]), data=body.encode("utf-8"),
+                                         headers={"Title": title.encode("ascii", "replace").decode("ascii")[:80],
+                                                  "Priority": "urgent" if urgent else "high",
+                                                  "Tags": "rotating_light" if urgent else "bell"})
+            try:
+                with (_open or urllib.request.urlopen)(req, timeout=10) as r:
+                    r.read()
+                sent.append("phone")
+            except Exception as e:
+                errors.append("phone push to %s failed: %s" % (NTFY_HOST, getattr(e, "reason", e)))
+    return sent, errors
+
+
+def new_topic():
+    """A random, hard-to-guess ntfy topic name (anyone who knows it can read the alerts)."""
+    return "egx-" + "".join(random.SystemRandom().choice(string.ascii_lowercase + string.digits) for _ in range(20))
+
+
 # ---------------------------------------------------------------- files
 
 def read_text(path):

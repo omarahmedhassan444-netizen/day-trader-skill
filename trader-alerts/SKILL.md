@@ -41,6 +41,21 @@ python3 "${CLAUDE_SKILL_DIR}/alerts.py" list
 
 On a short Ramadan session the time alerts move up with the close (13:15, 13:20).
 
+## Notifications: Mac sound and your phone
+
+Every ALERT pops up on the Mac with a sound. For your phone, run once:
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" notify-setup     # makes a private ntfy channel, saved in trader/config.json
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" notify-test      # a test alert to the Mac and the phone
+```
+
+Then install the free **ntfy** app on the phone and subscribe to the channel
+it prints. Stop and flat-by alerts arrive as urgent. `/trader-entry watch`
+also notifies on GET READY, TRIGGERED and LATE. The channel name is the only
+key: anyone who knows it can read the alerts, so it is never shared. A failed
+notification never stops the alerts: it is printed as a note.
+
 ## Steps
 
 1. After the trade is entered (or logged as paper), run `add --from-plan`.

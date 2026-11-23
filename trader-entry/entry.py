@@ -767,8 +767,27 @@ def cmd_watch(a):
         write_json(a.out, entry_doc(res, now))
         print("Wrote %s." % a.out, flush=True)
 
+    raw_cfg = {}
+    if a.config and os.path.exists(a.config):
+        try:
+            with open(a.config, encoding="utf-8") as fh:
+                raw_cfg = json.load(fh)
+        except ValueError:
+            raw_cfg = {}
+    told = set()
+
     def emit(line):
         print(line, flush=True)
+        if a.no_notify:
+            return
+        kind = ("GET READY" if "GET READY:" in line else "TRIGGERED" if "TRIGGERED:" in line
+                else "LATE" if line.startswith("LATE") else None)
+        if kind and kind not in told:
+            told.add(kind)
+            _, errs = E.notify("EGX %s %s" % (sym, kind), line.split("Cairo  ", 1)[-1], raw_cfg,
+                               urgent=kind == "TRIGGERED")
+            for e in errs:
+                print("note: " + e, flush=True)
 
     code, _ = watch_loop(provider, now_fn, sleep_fn, emit, opts, every=a.every, until=until,
                          on_trigger=on_trigger)
@@ -857,6 +876,7 @@ def main(argv=None):
     p.add_argument("--every", type=float, default=30, help="seconds between polls while the feed is behind")
     p.add_argument("--until", help="stop at this Cairo time (HH:MM)")
     p.add_argument("--out", default="trader/entry.json", help="where a trigger is written")
+    p.add_argument("--no-notify", action="store_true", help="print only: no Mac or phone notification")
     p = sub.add_parser("watchlist", help="check every hit in trader/watchlist.json")
     common(p)
     p.add_argument("--watchlist", default="trader/watchlist.json")

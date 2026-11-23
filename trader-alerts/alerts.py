@@ -14,6 +14,8 @@
     python3 alerts.py check --now "2026-11-03 14:15" --offline tests/fixtures/trader-alerts
     python3 alerts.py list
     python3 alerts.py reset comi-plan-stop
+    python3 alerts.py notify-setup                   # phone alerts: your private ntfy channel
+    python3 alerts.py notify-test                    # a test notification to the Mac and the phone
 
 Rule types:
   above / target  the price is at or above "price"
@@ -35,6 +37,11 @@ The 5-minute rule. add --from-plan writes, for the plan's day:
 so you hear about every action at least 5 minutes before you have to take it
 in your broker app, whenever the clock or the price allows it. Prices here are
 15 MINUTES LATE: a price alert can ring after the live price has moved on.
+
+Notifications: every ALERT also pops up on the Mac with a sound, and on your
+phone through the free ntfy app when "notify_ntfy_topic" is in trader/config.json
+(alerts.py notify-setup makes one). Stop and flat-by alerts are sent as urgent.
+--no-notify prints only.
 
 A rule with "date" is only watched on that Cairo date (rules from a plan are
 for the plan's day only). An above / below alert rings ONCE and then stays
@@ -518,7 +525,48 @@ def cmd_check(a):
         if rings:
             print("An alert is information, not an order. Check the live price in your broker app, act there "
                   "yourself, then record any fill: ticket.py fill.")
+    if rings and not a.no_notify:
+        cfg = _read(a.config, {}) or {}
+        for r in rings:
+            urgent = any(w in r["id"] for w in ("-plan-stop", "-flat-by")) and "warn" not in r["id"]
+            title = "EGX %s%s" % ("STOP " if r["id"].endswith("-plan-stop") else "", r.get("symbol") or "alert")
+            sent, errs = E.notify(title, r["message"], cfg, urgent=urgent)
+            for e in errs:
+                print("note: " + e)
     return 0 if rings else 1
+
+
+def cmd_notify_setup(a):
+    cfg = _read(a.config, None)
+    if cfg is None:
+        raise AlertError("no config at %s: make one from trader-budget/config.example.json first" % a.config)
+    topic = cfg.get("notify_ntfy_topic") or E.new_topic()
+    cfg["notify_ntfy_topic"] = topic
+    cfg.setdefault("notify_mac", True)
+    _write(a.config, cfg)
+    print("Phone alerts are set up. Your private channel: %s" % topic)
+    print("")
+    print("On your phone:")
+    print("  1. Install the free app \"ntfy\" (App Store or Google Play).")
+    print("  2. Open it, tap +, and subscribe to the topic: %s" % topic)
+    print("     (server: ntfy.sh, the default). Allow notifications when it asks.")
+    print("  3. Back here, run: alerts.py notify-test")
+    print("")
+    print("Anyone who knows this channel name can read your alerts: do not share it.")
+    return 0
+
+
+def cmd_notify_test(a):
+    cfg = _read(a.config, {}) or {}
+    sent, errs = E.notify("EGX test", "Test alert from trader-alerts: if you can read this, alerts reach you.",
+                          cfg, urgent=False)
+    for e in errs:
+        print("error: " + e)
+    if sent:
+        print("Sent to: %s." % ", ".join(sent))
+    else:
+        print("Nothing was sent. On a Mac the notification needs macOS; for your phone run alerts.py notify-setup.")
+    return 0 if sent else 1
 
 
 def cmd_add(a):
@@ -640,6 +688,12 @@ def main(argv=None):
     p.add_argument("--state", default="trader/state/alerts.json")
     p.add_argument("--prices-out", default="trader/prices.json")
     p.add_argument("--no-write", action="store_true")
+    p.add_argument("--config", default="trader/config.json", help="notify_mac / notify_ntfy_topic")
+    p.add_argument("--no-notify", action="store_true", help="print only: no Mac or phone notification")
+    p = sub.add_parser("notify-setup", help="make your private phone channel (ntfy) and save it in the config")
+    p.add_argument("--config", default="trader/config.json")
+    p = sub.add_parser("notify-test", help="send a test notification to the Mac and the phone")
+    p.add_argument("--config", default="trader/config.json")
     p = sub.add_parser("add", help="add a rule")
     p.add_argument("--rules", default="trader/alerts.json")
     p.add_argument("--state", default="trader/state/alerts.json")
@@ -676,7 +730,8 @@ def main(argv=None):
         return 1
     try:
         return {"clock": cmd_clock, "quote": cmd_quote, "check": cmd_check, "add": cmd_add,
-                "list": cmd_list, "reset": cmd_reset}[a.cmd](a)
+                "list": cmd_list, "reset": cmd_reset, "notify-setup": cmd_notify_setup,
+                "notify-test": cmd_notify_test}[a.cmd](a)
     except AlertError as e:
         print("alerts.py: %s" % e, file=sys.stderr)
         return 1

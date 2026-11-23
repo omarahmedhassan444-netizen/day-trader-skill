@@ -23,6 +23,8 @@ check it before you act.
 Every order is a ticket you type into the app yourself, after `/trader-risk`
 passes it and you say yes to that one ticket. Paper trading is the default.
 
+**Alerts reach your phone.** `trader-alerts/alerts.py notify-setup` links the free ntfy app, and every alert also pops up on the Mac with a sound.
+
 **Every action gets a 5-minute warning** whenever the clock or the price
 allows it: GET READY before an entry trigger, halfway to your stop and your
 target, and 5 minutes before you must be flat. A trigger without one is LATE.

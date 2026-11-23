@@ -316,3 +316,54 @@ class RealTimeWords(unittest.TestCase):
             self.assertIn("15 min late", ticket.entry_steps(order, {})[-1])
         finally:
             ticket.E.LAST.update(old)
+
+
+class Notify(unittest.TestCase):
+    def test_phone_push_and_mac_sound(self):
+        sent_req = []
+
+        class R(object):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def read(self): return b"{}"
+
+        def fake_open(req, timeout=None):
+            sent_req.append(req)
+            return R()
+        ran = []
+        real = E.sys.platform
+        E.sys.platform = "darwin"
+        try:
+            sent, errs = E.notify("EGX STOP COMI", "COMI is EGP 121.70: at or below your stop 121.75.",
+                                  {"notify_ntfy_topic": "egx-abcdefgh12345678"}, urgent=True,
+                                  _run=lambda *a, **k: ran.append(a), _open=fake_open)
+        finally:
+            E.sys.platform = real
+        self.assertEqual((sent, errs), (["mac", "phone"], []))
+        self.assertIn("osascript", ran[0][0])
+        self.assertIn('sound name "Glass"', ran[0][0][2])
+        self.assertEqual(sent_req[0].full_url, "https://ntfy.sh/egx-abcdefgh12345678")
+        self.assertEqual(sent_req[0].get_header("Priority"), "urgent")
+
+    def test_nothing_configured_sends_nothing_off_a_mac(self):
+        real = E.sys.platform
+        E.sys.platform = "linux"
+        try:
+            self.assertEqual(E.notify("t", "b", {}), ([], []))
+        finally:
+            E.sys.platform = real
+
+    def test_failures_never_raise(self):
+        def boom(req, timeout=None):
+            raise OSError("offline")
+        sent, errs = E.notify("t", "b", {"notify_mac": False, "notify_ntfy_topic": "egx-abcdefgh12345678"},
+                              _open=boom)
+        self.assertEqual(sent, [])
+        self.assertIn("phone push to ntfy.sh failed", errs[0])
+        _, errs = E.notify("t", "b", {"notify_mac": False, "notify_ntfy_topic": "bad topic!"})
+        self.assertIn("8 to 64", errs[0])
+
+    def test_topic_is_random_and_valid(self):
+        a, b = E.new_topic(), E.new_topic()
+        self.assertNotEqual(a, b)
+        self.assertRegex(a, r"^egx-[a-z0-9]{20}$")
