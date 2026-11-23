@@ -320,10 +320,17 @@ def _connect():
         raise EGXDataError("could not reach %s: %s" % (WS_HOST, e))
 
 
-def _converse(ws, wanted, on_msg):
-    """Read until on_msg says every wanted key is done. Answers heartbeats."""
+def _converse(ws, wanted, on_msg, deadline=None):
+    """Read until on_msg says every wanted key is done. Answers heartbeats.
+    Stops at an overall deadline (TIMEOUT seconds by default): heartbeats keep a
+    socket alive forever, so the deadline is what ends a request that never finishes."""
+    import time as _time
     done = set()
+    stop_at = _time.time() + (deadline or TIMEOUT)
     while done != wanted:
+        if _time.time() > stop_at:
+            missing = ", ".join(sorted(wanted - done))
+            raise EGXDataError("%s did not finish %s within %d seconds" % (WS_HOST, missing, deadline or TIMEOUT))
         try:
             raw = ws.recv()
         except Exception as e:
@@ -484,6 +491,9 @@ def quote(symbols):
                 if n in vals:
                     status[n] = p[1].get("s")
                     vals[n].update(p[1].get("v") or {})
+                    if status[n] == "error" and n not in seen:   # no quote_completed follows an error
+                        seen.add(n)
+                        return n
             elif f.get("m") == "quote_completed" and len(p) > 1:
                 n = str(p[1]).split(":")[-1]
                 if n in vals and n not in seen:
