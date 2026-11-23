@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+# your own trading files: config, plans, orders, logs
+trader/

@@ -1,203 +1,87 @@
 ---
 name: trader-scanner
 description: >-
-  Chart Scanner. Scans thousands of charts for setups: opening-range
-  breakouts, flags, oversold bounces. Builds the list of US-listed common
-  stocks, ordinary shares and ADRs from Nasdaq Trader's symbol directories,
-  runs a pre-market scan of daily closes (20-day closing-high breakout, bull
-  flag, reclaimed the 20-day average, oversold, oversold bounce) and an
-  intraday opening-range breakout scan on 5-minute bars, then writes
-  trader/watchlist.json for trader-news and trader-entry. Free Yahoo data,
-  bar by bar. Use when the user says "scan the market", "find me setups",
-  "what is breaking out", "opening range breakouts", "scan for bull flags",
-  "oversold stocks", "pre-market scan", "build my watchlist", "what should I
-  look at today", or at the start of a trading day before /trader-news.
-argument-hint: "[universe | daily | orb] [--at HH:MM]"
+  Chart Scanner for EGX. Scans every stock on the Egyptian Exchange for
+  setups. Before the open (from daily closes): 20-day breakouts, bull flags,
+  reclaims of the 20-day average, oversold (RSI under 30) and oversold
+  bounces. During the session (from 5-minute bars): opening-range breakouts,
+  the first close above the 10:00 to 10:15 Cairo range. Builds the stock list
+  from TradingView's EGX screener, reads TradingView bars (15 minutes late),
+  lists failed tickers by name, and writes trader/watchlist.json for
+  /trader-news and /trader-entry. Use when the user says "scan the market",
+  "what's breaking out", "find setups", "pre-market scan", "opening range
+  breakouts", "what's oversold", or "run the scanner".
+argument-hint: "[universe | daily | orb] [--symbols A,B] [--at HH:MM]"
 ---
 
 # trader-scanner
 
-The Chart Scanner is the first step of a day trade. It reads thousands of
-free charts and lists the ones that match a rule. That is all it does. A scan
-is a list of charts that match a rule, not a list of stocks to buy, and a
-setup on a chart is not a prediction. Most people who day trade lose money;
-the scanner does not change that. It only saves you from flipping through
-5,000 charts by hand.
+A scan narrows about 290 EGX stocks to a short list worth looking at. It is a
+list of charts that match a rule, not a list of stocks to buy.
 
 `${CLAUDE_SKILL_DIR}` below is this skill's folder (where this SKILL.md lives).
 
 ```bash
-python3 "${CLAUDE_SKILL_DIR}/scan.py" universe                       # -> trader/universe.txt
-python3 "${CLAUDE_SKILL_DIR}/scan.py" daily                          # before the open -> trader/watchlist.json
-python3 "${CLAUDE_SKILL_DIR}/scan.py" daily --symbols TSLA,NVDA,AMD  # or --watchlist FILE, --limit 200
-python3 "${CLAUDE_SKILL_DIR}/scan.py" orb                            # after 9:50 AM ET -> trader/watchlist.json
-python3 "${CLAUDE_SKILL_DIR}/scan.py" orb --at 10:15                 # cut the clock at 10:15 AM ET
-python3 "${CLAUDE_SKILL_DIR}/scan.py" orb --watchlist trader/watchlist.json --json
+python3 "${CLAUDE_SKILL_DIR}/scan.py" universe                        # every EGX stock -> trader/universe.txt
+python3 "${CLAUDE_SKILL_DIR}/scan.py" daily                           # before 10:00: daily setups
+python3 "${CLAUDE_SKILL_DIR}/scan.py" daily --symbols COMI,ETEL,HRHO
+python3 "${CLAUDE_SKILL_DIR}/scan.py" orb                             # after 10:20 Cairo: breakouts so far
+python3 "${CLAUDE_SKILL_DIR}/scan.py" orb --at 10:30 --limit 100
 ```
 
-Flags: `--min-price 5` and `--min-volume` (daily 1,000,000, orb 0),
-`--or-minutes 15`, `--max-confirm 200` (orb stage 2),
-`--now "2026-10-19 10:15"` (New York time) to pin the clock, `--offline PATH`
-to read saved Yahoo files, `--no-write`, `--show N`, `--json`. Exit code 0
-when the scan found something, 1 when it found nothing or could not run (the
-reason is one plain line).
+Flags: `--min-price` (1 EGP), `--min-volume` (daily: 100,000 shares a day on
+average; orb: 0), `--limit N`, `--watchlist FILE`, `--offline FILE`,
+`--now "2026-11-03 10:30"` (Cairo), `--json`, `--show N`.
 
-## What it reads and writes
+## The rules
 
-| file | what |
-| --- | --- |
-| `trader/universe.txt` | written by `universe`: one `SYMBOL\|Name` a line, read by `daily` and `orb` |
-| `trader/watchlist.json` | written by `daily` and `orb`: `mode`, `as_of`, `universe`, `scanned`, `failed`, `hits[]`. trader-news and trader-entry read `hits[].symbol` |
-| `trader/config.json` | read by `orb`: `no_entries_after` (default 15:30) |
-
-## The universe
-
-`universe` downloads `nasdaqlisted.txt` and `otherlisted.txt` from
-nasdaqtrader.com/dynamic/SymDir and keeps a row when, in this order:
-
-1. It is not a test issue, not an ETF, not NextShares.
-2. It is a plain ticker: 1 to 5 letters, or 1 to 4 letters plus one class
-   letter after a dot (BRK.B). A `$` preferred (ABR$D) is out, and so is a
-   `.U`, `.W` or `.R` suffix (units, warrants, rights).
-3. Out, whatever else the name says: warrants; SPAC units and rights ("Units,
-   each consisting of", "Rights to receive"); notes, ETNs, debentures; a %
-   coupon; "Depositary Shares" that are not American or Global (those carry a
-   preferred).
-4. In: the name calls it common stock, common shares or units, ordinary
-   shares, shares of beneficial interest, ADS / ADR / American or Global
-   depositary shares, or partnership or trust units.
-5. Out: the name still says unit, right, bond, preferred or preference.
-6. In: everything else (plain names like "AMETEK, Inc.").
-
-On the Oct 19 2026 files this keeps 5,943. The reel said 5,259: that count
-came from an ad hoc filter (names that say common or ordinary, no ADRs). All
-5,259 of those are in this list; the 684 extra are mostly ADRs, closed-end
-funds and partnership units. The Oct 20 files gave 5,942.
-
-## The daily scan (before the open)
-
-Yahoo's spark endpoint returns closes for 20 symbols a request, so 5,942
-symbols take 298 requests. On Oct 20 2026 that took 145 seconds with the
-polite pause (0.3 s). Liquidity comes from the spark meta: last price at
-least `--min-price` and last session's volume at least `--min-volume`. Run it
-before the open or after the close: during the session the volume is the
-day's so far, and today's daily bar is left out until 4:00 PM.
-
-The setups are computed from daily closes only (spark has no highs or lows),
-so they are close cousins of the reel's `refs/scan.py`, which used highs and
-lows:
-
-| setup | the rule on closes |
-| --- | --- |
-| `breakout_20d` | the last close is above every close of the 20 sessions before it |
-| `bull_flag` | up more than 10 % over the 10 sessions before the last 5, then the last 5 closes inside a 5 % range |
-| `reclaim_ma20` | the close before was under its 20-day average, the last close is above it |
-| `oversold` | RSI 14 (Wilder) under 30 |
-| `oversold_bounce` | RSI 14 was under 30 yesterday and today closed up |
-
-A closing-high breakout fires more often than an intraday-high one (KO on
-Oct 16 broke its 20-day closing high, not its 20-day intraday high). Hits are
-listed most traded first (price times volume).
-
-## The opening-range breakout scan (during the session)
-
-The opening range is the first `--or-minutes` (15) of the session: the 9:30,
-9:35 and 9:40 five-minute bars. A hit is the first completed 5-minute bar
-to CLOSE above the range high, at that bar's close time.
-
-1. Stage 1, every symbol: spark closes of today's 5-minute bars, 20 a
-   request. A chart goes on only if a completed bar after the range closed at
-   or above the highest close of the range. That is a necessary condition
-   (the range high is at least every range close), so no breakout is lost.
-2. Stage 2, each candidate: the v8 chart with real highs and lows, one
-   request each. Range high = the highest high of the range bars, range low =
-   the lowest low. On a strong morning most charts are candidates, so stage 2
-   checks at most `--max-confirm` (200) of them, the most traded first (price
-   times volume so far), and prints PARTIAL with the count it skipped.
-   `--max-confirm 0` checks them all.
-
-Timing, live on Tue Oct 20 2026 (a strong morning): 100 liquid names at
-10:01 AM took 35 seconds (5 spark requests, 70 v8 charts, 51 of 91 usable
-charts broke out). The whole universe at 10:03 AM took about 4 minutes (298
-spark requests, then 200 v8 charts): 2,448 usable charts, 1,782 candidates,
-the 200 most traded checked, 119 of those broke out. For a fast answer, scan
-the daily watchlist or a list of names you trade (`--watchlist`, `--symbols`).
-
-A chart is usable only when every 5-minute bar from 9:30 to the cutoff is
-there; a missing bar means a halt or a thin stock. Null closes are dropped,
-a bar off the 5-minute grid (the live tick, like 10:58:07) is dropped, and a
-bar counts only once it is complete (start + 5 minutes). Before 9:50 AM, on a
-weekend or holiday, after the close, or after `no_entries_after` (an expired
-setup) it prints one plain line and writes nothing. The 1:00 PM early closes
-are in the calendar.
-
-## Data and limits
-
-- Yahoo's chart and spark endpoints are free, unofficial and can lag. Bars are
-  5-minute bars, bar by bar, never tick by tick. query2 first, query1 on a 429
-  or 5xx, one retry after a 5-second wait on a 429.
-- Partial results are said as partial: "Fetched 4,980 of 5,259 charts (279
-  failed or had no data)". Never round a partial scan up to "the whole market".
-- NYSE holidays and early closes for 2026 and 2027 (nyse.com, read 2026-10-13).
+- **daily**, from complete daily bars (today's is dropped until 14:30):
+  breakout_20d (the last close above every close of the 20 before it),
+  bull_flag (up over 10 % in 10 sessions, then 5 closes inside a 5 % range),
+  reclaim_ma20, oversold (RSI 14 under 30), oversold_bounce.
+- **orb**, from 5-minute bars: the range is the 10:00, 10:05 and 10:10
+  bars; a hit is the first completed bar after it to CLOSE above the range
+  high. EGX is thin, so a chart counts when its 10:00 bar is there and at
+  least 80 % of its bars up to the cutoff traded.
+- Data from TradingView, about 50 tickers a connection, one attempt each.
+  Every ticker that failed is listed by name.
+- A breakout seen on the scanner happened at least 15 minutes earlier.
 
 ## Steps
 
-1. Once a week or so: `scan.py universe`.
-2. Before the open: `scan.py daily`. Tell the user the counts (fetched,
-   liquid, scanned, hits) and the top few by setup.
-3. After 9:50 AM ET (10:15 is the classic): `scan.py orb`. Tell the user how
-   many usable charts broke their range and when, and that a later hit is
-   closer to the price now.
-4. The user picks one chart. Hand it on: `/trader-news TICKER` (what is moving
-   it), then `/trader-entry TICKER` (the entry bar by bar). Never pick for them.
+1. Once: `scan.py universe`.
+2. Before the open: `scan.py daily`. Give the user the hits, most traded
+   first, and say these are charts, not picks.
+3. After 10:20: `scan.py orb`. Pick one chart with the user, then
+   `/trader-news TICKER` and `/trader-entry TICKER`.
 
-## Example: the reel
-
-Monday Oct 19 2026, scan at 10:15 AM over the reel's 234-ticker wall
-(`tests/fixtures/trader-scanner/wall5m-2026-10-19.json.gz`, real Yahoo charts):
+## Example: 3 November 2026, 10:30 Cairo, the 60 most traded stocks
 
 ```
-python3 scan.py orb --offline wall5m-2026-10-19.json.gz --now "2026-10-19 10:15" --min-price 0
-Fetched 233 of 234 charts (1 failed or had no data); 231 usable; 95 candidates, 95 confirmed with real highs and lows.
-42 of 231 charts closed above their opening-range high by 10:15 AM:
-   9:50 AM  AMC         $2.97  range 2.90 to 2.96  +0.50% over
-  ...
-  10:15 AM  TSLA      $364.18  range 354.47 to 362.18  +0.55% over
+Opening-range breakout scan, Tue 2026-11-03 10:30 Cairo: 15-minute range (10:00 to 10:15), 5-minute bars, TradingView (15 min late).
+Fetched 60 of 60 charts; 60 usable.
+35 of 60 charts closed above their opening-range high by 10:30:
+   ...
+   10:25  COMI      EGP 122.41  range 121.51 to 122.00  +0.34% over
 ```
-
-The reel's wall had no price floor (AMC at $2.97 is one of the 42), hence
-`--min-price 0`; with the default $5 floor it is 41. TSLA's range is the 9:30
-to 9:40 bars, high 362.18, low 354.47; the 10:10 bar closed at 364.18, 0.55 %
-over the high, at 10:15 AM. The user picks TSLA and Claude hands it to
-`/trader-news TSLA`, then `/trader-entry TSLA`. In the reel the universe was
-5,259 US stocks; this tool's rule gives 5,943 on the same files.
-
-The pre-market scan that morning (closes through Fri Oct 16, the reel's daily
-charts) tags BLK, CI, XOM and HD a 20-day breakout, CCL a bull flag, F, JPM
-and GE a reclaim of the 20-day average, and BAC, MS, RIVN and PLUG oversold,
-as the reel did. On closes it also tags KO (breakout), RCL (flag) and PNC (an
-oversold bounce).
-
-## Rules
-
-- Say what was scanned: how many symbols, how many charts came back, how many
-  were usable, and the time of the data.
-- Say "matched a rule", never "a buy", "a winner" or "a good trade".
-- Never print a P&L, a return or a profit figure.
-- A hit is stale once the price has moved on. Re-run before acting on it.
 
 ## What it never does
 
-It never places, sizes or checks an order, never says which stock to buy,
-never calls data real time, and never promises that a setup works.
+It never ranks a hit as a buy, never places anything, never drops a failed
+ticker without saying so.
 
 ## Safety
 
-- Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.
+- Not financial advice. This is software that reads public data and does arithmetic. A PASS is a rules
+  check, not a recommendation. Most people who day trade lose money.
 - Paper trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
-- Nothing in this pack places an order except trader-broker, and only when all three hold: trader-risk
-  passed that exact order today, the user typed an explicit yes for that one order in the chat, and the
-  user clicked Allow once on Claude's own card because the order tool is set to "Needs approval"
-  (Customize > Connectors > tool permissions). Never set an order tool to "Always allow".
-- No options, margin, short selling or leverage unless the config allows it and the user confirms.
-- Broker keys live in environment variables or the Claude Desktop config, never in the chat.
+- Nothing in this pack places an order. The broker (Telda) has no API: every order is a ticket the user
+  types in by hand, and only after trader-risk passed that exact order today and the user said an explicit
+  yes to that one ticket in the chat. Never ask for logins, PINs, card or account details.
+- Prices are TradingView's free EGX feed, DELAYED 15 MINUTES. Say so on every signal and ticket, and tell
+  the user to check the live price in their broker app before acting. Never present a delayed price as live.
+- The 5-minute rule: every action gets a warning at least 5 minutes before the user has to act, whenever
+  the clock or the price allows it. A trigger that came without one is LATE: skip it or recheck it.
+- No options, margin, short selling or leverage. A day trade needs a stock on EGX's intraday (T+0) list,
+  the only stocks that can be sold the same day they are bought.
+- If a website is blocked, name the exact host and stop. Do not retry in a loop.
