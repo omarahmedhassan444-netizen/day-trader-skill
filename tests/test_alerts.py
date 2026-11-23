@@ -133,11 +133,31 @@ class Cli(unittest.TestCase):
                                   "--config", os.path.join(tmp, "none.json")])
             self.assertEqual(code, 0, err)
             code, out, err = run(["check", "--rules", rules, "--state", state, "--offline", QDIR,
-                                  "--prices-out", os.path.join(tmp, "p.json"), "--now", "2026-11-03 14:15"])
+                                  "--prices-out", os.path.join(tmp, "p.json"), "--now", "2026-11-03 14:15",
+                                  "--no-notify"])
             self.assertEqual(code, 0, err)
             self.assertIn("EGX OPEN (2026-11-03 14:15 Cairo", out)
             self.assertIn("5-minute warning: sell by 14:20", out)
             self.assertNotIn("$", out)
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_notify_setup_writes_a_private_topic(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            cfg = os.path.join(tmp, "config.json")
+            with open(cfg, "w") as fh:
+                json.dump({"budget": 50000}, fh)
+            code, out, _ = run(["notify-setup", "--config", cfg])
+            self.assertEqual(code, 0)
+            with open(cfg) as fh:
+                doc = json.load(fh)
+            self.assertRegex(doc["notify_ntfy_topic"], r"^egx-[a-z0-9]{20}$")
+            self.assertEqual(doc["budget"], 50000)
+            self.assertIn("ntfy", out)
+            code, out2, _ = run(["notify-setup", "--config", cfg])
+            with open(cfg) as fh:
+                self.assertEqual(json.load(fh)["notify_ntfy_topic"], doc["notify_ntfy_topic"])   # kept
         finally:
             shutil.rmtree(tmp)
 
