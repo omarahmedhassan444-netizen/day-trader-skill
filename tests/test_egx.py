@@ -200,3 +200,119 @@ class Cli(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Login(unittest.TestCase):
+    """Your TradingView session for real-time data: kept outside the repo, owner-only, never required."""
+
+    PAGE_OUT = 'x<script>var is_authenticated = false;\n var user = {"username":"Guest","following":"0"};</script>'
+    PAGE_IN = ('x<script>var is_authenticated = true;\n var user = {"username":"omar","auth_token":"eyJ.abc.def",'
+               '"is_pro":true};</script> "username":"OANDA"')
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.path = os.path.join(self.tmp, "cfg", "tradingview.json")
+        self.old_env = os.environ.get(E.CRED_ENV)
+        os.environ[E.CRED_ENV] = self.path
+        E._AUTH.update(token=None, user=None, checked=False, note=None)
+        E.LAST["delay"] = None
+
+    def tearDown(self):
+        import shutil
+        if self.old_env is None:
+            os.environ.pop(E.CRED_ENV, None)
+        else:
+            os.environ[E.CRED_ENV] = self.old_env
+        E._AUTH.update(token=None, user=None, checked=False, note=None)
+        E.LAST["delay"] = None
+        shutil.rmtree(self.tmp)
+
+    def test_page_parsing(self):
+        self.assertEqual(E.parse_auth_page(self.PAGE_OUT), (None, "Guest"))
+        self.assertEqual(E.parse_auth_page(self.PAGE_IN), ("eyJ.abc.def", "omar"))
+        self.assertEqual(E.parse_auth_page("no user here"), (None, None))
+
+    def test_saved_owner_only_outside_the_repo(self):
+        E.save_cred({"sessionid": "s1", "sessionid_sign": "v2", "other": "x"})
+        self.assertEqual(E.cred_path(), self.path)
+        self.assertEqual(oct(os.stat(self.path).st_mode & 0o777), "0o600")
+        self.assertEqual(E.load_cred(), {"sessionid": "s1", "sessionid_sign": "v2"})
+        self.assertFalse(self.path.startswith(ROOT))
+
+    def test_no_login_means_the_anonymous_delayed_feed(self):
+        self.assertEqual(E.auth_token(), E.ANON_TOKEN)
+        self.assertEqual(E.delay_phrase(), " (15 min late)")
+
+    def test_a_good_login_is_used(self):
+        E.save_cred({"sessionid": "s1"})
+        real = E.fetch_auth_token
+        E.fetch_auth_token = lambda cred, timeout=20: ("eyJ.abc.def", "omar")
+        try:
+            self.assertEqual(E.auth_token(), "eyJ.abc.def")
+            self.assertEqual(E.login_lines(0), ["TradingView login: signed in as omar, EGX real-time."])
+            self.assertIn("no EGX real-time data subscription", E.login_lines(900)[0])
+        finally:
+            E.fetch_auth_token = real
+
+    def test_a_bad_login_falls_back_and_says_why(self):
+        E.save_cred({"sessionid": "expired"})
+        real = E.fetch_auth_token
+
+        def bad(cred, timeout=20):
+            raise E.EGXDataError("TradingView did not accept the saved session (signed out or expired)")
+        E.fetch_auth_token = bad
+        try:
+            with redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(E.auth_token(), E.ANON_TOKEN)
+            self.assertIn("Using the delayed feed", err.getvalue())
+            self.assertIn("did not accept", E.login_lines(900)[0])
+        finally:
+            E.fetch_auth_token = real
+
+    def test_signed_in_connects_to_the_pro_host_first(self):
+        import types
+        seen = []
+
+        def fake_create(url, header=None, timeout=None):
+            seen.append(url)
+            if "prodata" in url:
+                raise OSError("refused")
+            return "socket"
+        fake = types.ModuleType("websocket")
+        fake.create_connection = fake_create
+        import sys as _sys
+        real_mod = _sys.modules.get("websocket")
+        _sys.modules["websocket"] = fake
+        E._AUTH.update(token="eyJ.abc.def", checked=True)
+        try:
+            self.assertEqual(E._connect(), "socket")
+            self.assertEqual(seen, ["wss://prodata.tradingview.com/socket.io/websocket",
+                                    "wss://data.tradingview.com/socket.io/websocket"])
+        finally:
+            if real_mod is None:
+                _sys.modules.pop("websocket", None)
+            else:
+                _sys.modules["websocket"] = real_mod
+
+    def test_delay_words_follow_the_feed(self):
+        self.assertEqual(E.delay_phrase(900), " (15 min late)")
+        self.assertEqual(E.delay_phrase(0), "")
+        self.assertIn("real-time", E.late_sentence(0))
+        self.assertIn("15 min late", E.late_sentence(900))
+        E.LAST["delay"] = 0
+        self.assertEqual(E.delay_phrase(), "")
+
+
+class RealTimeWords(unittest.TestCase):
+    def test_broker_ticket_drops_the_delay_line_on_real_time(self):
+        ticket = load("trader-broker", "ticket")
+        order = {"symbol": "COMI", "side": "buy", "qty": "1", "type": "market", "time_in_force": "day"}
+        old = dict(E.LAST)
+        try:
+            E.LAST["delay"] = 0
+            ticket.E.LAST["delay"] = 0
+            self.assertEqual(ticket.entry_steps(order, {})[-1], "Check the live price in Telda first.")
+            ticket.E.LAST["delay"] = 900
+            self.assertIn("15 min late", ticket.entry_steps(order, {})[-1])
+        finally:
+            ticket.E.LAST.update(old)

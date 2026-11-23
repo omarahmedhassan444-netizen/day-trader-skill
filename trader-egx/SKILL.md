@@ -29,6 +29,8 @@ python3 "${CLAUDE_SKILL_DIR}/egx_data.py" quote COMI                # last price
 python3 "${CLAUDE_SKILL_DIR}/egx_data.py" universe                  # every EGX stock, most traded first
 python3 "${CLAUDE_SKILL_DIR}/egx_data.py" calendar                  # today's session and this year's holidays
 python3 "${CLAUDE_SKILL_DIR}/egx_data.py" calendar --refresh        # re-read hours and holidays from TradingView
+python3 "${CLAUDE_SKILL_DIR}/egx_data.py" login                     # real-time: save your TradingView session (own computer)
+python3 "${CLAUDE_SKILL_DIR}/egx_data.py" logout
 ```
 
 Needs one package for prices and quotes: `pip install websocket-client`. The
@@ -38,13 +40,43 @@ stock list and headlines use the standard library only. Python 3.8 or newer.
 
 | what | host |
 | --- | --- |
-| bars, quotes, fundamentals, session hours, holidays | `data.tradingview.com` (websocket) |
+| bars, quotes, fundamentals, session hours, holidays | `data.tradingview.com` (websocket); `prodata.tradingview.com` when signed in |
+| your login: the session cookie swapped for a token | `www.tradingview.com` |
 | the stock list and screening | `scanner.tradingview.com` |
 | headlines per stock and for the Egyptian market | `news-headlines.tradingview.com` |
 
 Without a TradingView login TradingView reports `delayed_streaming_900`: EGX
-prices are **15 minutes late**. Every chart and quote carries that delay, and
-every tool repeats it. The price in the broker app is the one that fills.
+prices are **15 minutes late**. Every chart and quote carries the delay
+TradingView reports, and every tool repeats it. The price in the broker app is
+the one that fills.
+
+## Real-time data (your TradingView subscription)
+
+TradingView sells Egyptian Exchange real-time data for $14.95 a month (its
+Market Data page; it may also need a paid TradingView plan). With it:
+
+1. On tradingview.com: sign in and buy the Egyptian Exchange real-time data
+   (Profile, Market data subscriptions).
+2. **On your own computer**, in a terminal: `python3 trader-egx/egx_data.py login`.
+   It explains how to copy the `sessionid` and `sessionid_sign` cookies from
+   your browser and reads them with hidden input. They are saved in
+   `~/.config/egx-trader/tradingview.json` (owner-only), never in the repo.
+3. `python3 trader-egx/egx_data.py status` should then say
+   "TradingView login: signed in as ..., EGX real-time". Every tool then gets
+   real-time bars and quotes (from `prodata.tradingview.com`) and stops saying
+   "15 min late".
+
+Rules for the login:
+- Never ask the user to paste the cookies into a chat, and never write them to
+  a file in the repo or an environment setting: only `egx_data.py login`, on
+  the user's own computer.
+- Signing out of TradingView in the browser ends the saved session: run
+  `login` again. A failed or expired login never stops the tools: they fall
+  back to the delayed feed and say why.
+- `egx_data.py logout` removes it.
+- Real-time data on TradingView is licensed for the subscriber's own use.
+  Using it through these tools is at the user's own risk under TradingView's
+  terms; it is never to be shared or redistributed.
 
 ## The calendar
 

@@ -195,9 +195,11 @@ def write_prices(path, quotes, now_utc, source="tradingview"):
         prices[s] = q["price"]
         detail[s] = {"prev_close": q.get("prev_close"), "time": q.get("time"), "source": q.get("source"),
                      "delay_seconds": q.get("delay_seconds"), "fetched": stamp}
+    delays = [q.get("delay_seconds") for q in quotes.values() if q.get("delay_seconds") is not None]
+    kind = ("Delayed quotes (%d minutes)" % (max(delays) // 60)) if delays and max(delays) else "Quotes"
     doc = {"as_of": stamp, "source": source, "currency": "EGP",
-           "note": ("Delayed quotes (15 minutes) for alerts and sizing checks. The price in your broker app is "
-                    "the one that fills. detail.time is the last trade's time, detail.fetched when it was read."),
+           "note": ("%s for alerts and sizing checks. The price in your broker app is the one that fills. "
+                    "detail.time is the last trade's time, detail.fetched when it was read." % kind),
            "prices": prices, "detail": detail}
     _write(path, doc)
     return doc
@@ -334,7 +336,7 @@ def evaluate(rules, quotes, status, state, now_utc):
         if not q:
             continue
         p = q["price"]
-        late = " (15 min late)" if q.get("delay_seconds") else ""
+        late = E.delay_phrase(q.get("delay_seconds") or 0)
         if typ in ("above", "below"):
             hit = p >= r["price"] if typ == "above" else p <= r["price"]
             if hit and rid not in rung:
@@ -478,8 +480,8 @@ def cmd_quote(a):
             print("error: " + e)
         if a.write and quotes:
             print("Wrote %d price(s) to %s." % (len(quotes), a.write))
-        print("Quotes are free and 15 minutes late: for alerts only. The price in your broker app is the one "
-              "that fills.")
+        print("Quotes are for alerts only%s. The price in your broker app is the one that fills."
+              % (" and" + E.delay_phrase().replace(" (", " ").rstrip(")") if E.delay_phrase() else ""))
     return 0 if quotes else 1
 
 
@@ -539,7 +541,7 @@ def cmd_add(a):
         for r in new:
             print("Added %s: %s" % (r["id"], json.dumps(r)))
         print("Run alerts.py check every minute or two while the trade is open (keep a session watching, or "
-              "/loop). Quotes are 15 minutes late: set the stop in your broker app too if it allows one.")
+              "/loop). Quotes can lag the market: set the stop in your broker app too if it allows one.")
         return 0
     if a.opening_bell:
         rule = {"id": a.id or "opening-bell", "type": "opening_bell"}

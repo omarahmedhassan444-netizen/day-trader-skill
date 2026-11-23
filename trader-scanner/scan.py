@@ -671,9 +671,12 @@ def cmd_orb(a):
     if a.json:
         print(json.dumps(dict(doc, counts=counts, seconds=round(time.time() - t0, 1)), indent=2))
         return 0 if hits else 1
+    delays = [s["meta"].get("delaySeconds") for s in data.values() if s.get("meta", {}).get("delaySeconds")
+              is not None]
+    late = E.delay_phrase(max(delays)) if delays else E.delay_phrase()
     print("Opening-range breakout scan, %s %s Cairo: %d-minute range (10:00 to %s), 5-minute bars, "
-          "TradingView (15 min late)." % (day_label(day), clock_label(cutoff), a.or_minutes,
-                                          clock_label(slot(day, a.or_minutes // BAR_MIN))))
+          "TradingView%s." % (day_label(day), clock_label(cutoff), a.or_minutes,
+                              clock_label(slot(day, a.or_minutes // BAR_MIN)), late or " (real-time)"))
     print("Fetched %d of %d charts; %d usable%s%s." % (
         counts["fetched"], len(symbols), counts["scanned"],
         (", %d too thin (under %d%% of bars traded)" % (counts["unusable"], int(MIN_FILL * 100)))

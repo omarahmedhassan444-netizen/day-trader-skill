@@ -365,7 +365,9 @@ def entry_steps(order, cfg):
     flat = (order.get("plan") or {}).get("flat_by") or cfg.get("flat_by")
     if flat and side == "BUY":
         steps.append("Flat by %s Cairo: sell whatever is still open (the warning comes 5+ minutes before)." % flat)
-    steps.append("Check the live price in %s first: the charts here are 15 minutes late." % app)
+    late = E.delay_phrase()
+    steps.append("Check the live price in %s first%s." % (
+        app, (": the charts here are" + late.replace(" (", " ").rstrip(")")) if late else ""))
     return steps
 
 
