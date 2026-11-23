@@ -1,0 +1,32 @@
+{
+  "budget": 50000,
+  "cash_buffer_pct": 10,
+  "max_position_pct": 75,
+  "max_order_egp": 40000,
+  "min_order_egp": 50,
+  "max_loss_per_trade_egp": 500,
+  "max_daily_loss_egp": 1500,
+  "max_trades_per_day": 3,
+  "max_orders_per_day": 10,
+  "min_reward_risk": 1.0,
+  "require_stop": true,
+  "no_entries_before": "10:15",
+  "no_entries_after": "14:00",
+  "flat_by": "14:20",
+  "fractional": false,
+  "fee_pct": 0.05,
+  "broker": "telda",
+  "manual": true,
+  "paper": true,
+  "blocked": [],
+  "same_day_list": [],
+  "allow_options": false,
+  "allow_margin": false,
+  "allow_short": false,
+  "_notes": {
+    "budget": "EGP 50,000 and EGP 500 max loss a trade are starting values: change them to yours.",
+    "fee_pct": "0.05 % each way, a conservative guess: Telda says it charges no commission, but EGX and regulator charges (about 0.01 % each) may apply. Set it from Telda's fee page.",
+    "same_day_list": "Empty: every buy warns. Fill it with EGX's current same-day (T+0) list from egx.com.eg or Telda, and day trades in anything else are blocked.",
+    "paper": "true: tickets say do NOT enter them. Set false only when you choose to trade real money."
+  }
+}

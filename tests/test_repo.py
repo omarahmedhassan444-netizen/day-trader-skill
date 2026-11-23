@@ -5,15 +5,17 @@ import unittest
 
 from _load import ROOT
 
-# v2, the day-trading pack: the eleven folders the reel's repo card shows
-SKILLS = ["trader-scanner", "trader-news", "trader-entry", "trader-exit", "trader-timemachine",
+# the EGX edition: the eleven day-trading skills (Pelosi became the EGX insider tracker) plus trader-egx
+SKILLS = ["trader-egx", "trader-scanner", "trader-news", "trader-entry", "trader-exit", "trader-timemachine",
           "trader-risk", "trader-budget", "trader-broker", "trader-alerts", "trader-analyst",
-          "trader-pelosi"]
-ABOUT = ("11 Claude skills for day trading: scan thousands of charts, track breaking news, time every "
-         "entry and exit, and replay every outcome before you risk a dollar.")
+          "trader-insiders"]
+ABOUT = ("12 Claude skills for day trading on the Egyptian Exchange (EGX): scan every chart, track news and "
+         "disclosures, time every entry and exit, and replay every outcome before you risk a pound.")
 # skills on the way to an order carry the safety block
 ORDER_PATH = ["trader-scanner", "trader-entry", "trader-exit", "trader-timemachine", "trader-budget",
-              "trader-pelosi", "trader-risk", "trader-broker", "trader-alerts"]
+              "trader-insiders", "trader-risk", "trader-broker", "trader-alerts"]
+# the US data sources and the order API the EGX edition no longer uses
+US_ONLY = ["finance.yahoo.com", "sec.gov", "nasdaqtrader", "house.gov", "place_stock_order", "alpaca"]
 V1_ONLY = ["trader-copycat", "trader-screener", "trader-tax", "trader-rebalance"]
 
 
@@ -33,14 +35,15 @@ def every_text_file():
 
 
 class Repo(unittest.TestCase):
-    def test_eleven_skill_folders_at_the_root(self):
+    def test_twelve_skill_folders_at_the_root(self):
         found = sorted(d for d in os.listdir(ROOT)
                        if os.path.isfile(os.path.join(ROOT, d, "SKILL.md")))
         self.assertEqual(found, sorted(SKILLS))
 
-    def test_root_matches_the_reel(self):
+    def test_root_holds_only_the_pack(self):
         root = sorted(d for d in os.listdir(ROOT) if not d.startswith(".git"))
-        self.assertEqual(root, sorted([".claude-plugin", "LICENSE", "README.md", "tests"] + SKILLS))
+        self.assertEqual(root, sorted([".claude-plugin", "LICENSE", "README.md", "tests", "trader"] + SKILLS))
+        self.assertEqual(os.listdir(os.path.join(ROOT, "trader")), ["config.json"])
 
     def test_frontmatter_name_and_description(self):
         for s in SKILLS:
@@ -68,15 +71,15 @@ class Repo(unittest.TestCase):
         self.assertEqual(market["name"], "day-trader-skill")
         self.assertEqual(market["plugins"][0]["name"], "day-trader-skill")
 
-    def test_readme_carries_the_reel_copy(self):
+    def test_readme_carries_the_install_and_the_fine_print(self):
         with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as fh:
             readme = " ".join(fh.read().split())
-        self.assertTrue(readme.startswith("# The Day Trader skill"))
+        self.assertTrue(readme.startswith("# The Day Trader skill: EGX edition"))
         for line in (ABOUT,
-                     "https://github.com/Jakeschincariol/day-trader-skill install skill",
-                     "/plugin marketplace add Jakeschincariol/day-trader-skill",
+                     "https://github.com/omarahmedhassan444-netizen/day-trader-skill install skill",
+                     "/plugin marketplace add omarahmedhassan444-netizen/day-trader-skill",
                      "/plugin install day-trader-skill@day-trader-skill",
-                     "## Fine print"):
+                     "15 minutes late", "Telda", "## Fine print"):
             self.assertIn(line, readme)
         for s in SKILLS:
             self.assertIn("/" + s, readme, s)
@@ -121,9 +124,11 @@ class Repo(unittest.TestCase):
     def test_day_trading_limits_ship_in_the_example_config(self):
         with open(os.path.join(ROOT, "trader-budget", "config.example.json")) as fh:
             cfg = json.load(fh)
-        for k in ("max_loss_per_trade_usd", "max_daily_loss_usd", "max_trades_per_day",
-                  "min_reward_risk", "require_stop", "no_entries_after", "flat_by"):
+        for k in ("max_loss_per_trade_egp", "max_daily_loss_egp", "max_trades_per_day",
+                  "min_reward_risk", "require_stop", "no_entries_after", "flat_by", "same_day_list", "fee_pct"):
             self.assertIn(k, cfg, k)
+        self.assertEqual((cfg["no_entries_before"], cfg["no_entries_after"], cfg["flat_by"]),
+                         ("10:15", "14:00", "14:20"))
         self.assertIs(cfg["require_stop"], True)
         self.assertIs(cfg.get("allow_short", False), False)
         self.assertIs(cfg.get("allow_margin", False), False)
@@ -133,6 +138,26 @@ class Repo(unittest.TestCase):
             cfg = json.load(fh)
         self.assertIs(cfg["paper"], True)
         self.assertIs(cfg.get("allow_options", False), False)
+        self.assertEqual((cfg["broker"], cfg["manual"]), ("telda", True))
+
+    def test_every_tool_fetches_through_trader_egx(self):
+        for s in SKILLS:
+            folder = os.path.join(ROOT, s)
+            for f in os.listdir(folder):
+                if not f.endswith((".py", ".md", ".json")):
+                    continue
+                with open(os.path.join(folder, f), encoding="utf-8") as fh:
+                    text = fh.read().lower()
+                for old in US_ONLY:
+                    self.assertNotIn(old, text, "%s/%s still mentions %s" % (s, f, old))
+                if f.endswith(".py") and s != "trader-egx":
+                    self.assertIn("import egx_data", text, "%s/%s" % (s, f))
+
+    def test_skills_say_the_delay_where_prices_matter(self):
+        for s in ("trader-egx", "trader-scanner", "trader-entry", "trader-alerts", "trader-broker"):
+            with open(os.path.join(ROOT, s, "SKILL.md"), encoding="utf-8") as fh:
+                low = " ".join(fh.read().lower().split())
+            self.assertIn("15 minutes", low, s)
 
 
 if __name__ == "__main__":

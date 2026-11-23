@@ -1,9 +1,12 @@
 {
   "rules": [
     {"id": "opening-bell", "type": "opening_bell"},
-    {"id": "tsla-plan-stop", "symbol": "TSLA", "type": "stop", "price": 358.32, "note": "plan stop: opening-range midpoint", "date": "2026-10-19"},
-    {"id": "tsla-plan-target", "symbol": "TSLA", "type": "target", "price": 370.04, "note": "plan target: 1R (one times the risk)", "date": "2026-10-19"},
-    {"id": "tsla-flat-by", "symbol": "TSLA", "type": "time", "at": "15:55", "label": "flat by close", "before_close": true, "date": "2026-10-19"},
-    {"id": "tsla-move-3", "symbol": "TSLA", "type": "pct_move", "pct": 3}
+    {"id": "comi-plan-warn-stop", "symbol": "COMI", "type": "warn_below", "price": 122.08, "note": "halfway to the stop 121.75: open your broker app", "date": "2026-11-03"},
+    {"id": "comi-plan-warn-target", "symbol": "COMI", "type": "warn_above", "price": 122.74, "note": "halfway to the target 123.07: open your broker app", "date": "2026-11-03"},
+    {"id": "comi-plan-stop", "symbol": "COMI", "type": "stop", "price": 121.75, "note": "plan stop: opening-range midpoint", "date": "2026-11-03"},
+    {"id": "comi-plan-target", "symbol": "COMI", "type": "target", "price": 123.07, "note": "plan target: 1R (one times the risk)", "date": "2026-11-03"},
+    {"id": "comi-flat-by-warning", "symbol": "COMI", "type": "time", "at": "14:15", "label": "5-minute warning: sell by 14:20", "before_close": true, "action": "warn", "date": "2026-11-03"},
+    {"id": "comi-flat-by", "symbol": "COMI", "type": "time", "at": "14:20", "label": "flat by close", "before_close": true, "action": "flatten", "date": "2026-11-03"},
+    {"id": "etel-move-3", "symbol": "ETEL", "type": "pct_move", "pct": 3}
   ]
 }

@@ -1,172 +1,79 @@
 ---
 name: trader-risk
 description: >-
-  Risk Manager. Checks every trade against your limits and stops anything
-  over them, before it can reach the broker. For a day trade: a stop is
-  required, the loss at the stop must fit your max loss per trade (measured
-  from the higher of the plan's entry and a fresh price), reward:risk must
-  meet your minimum, the day's total risk must fit your daily loss limit, no
-  more than your trades per day, and no new entries outside your entry
-  window or when the market is closed. It also keeps the basics: blocked
-  tickers, order size, position cap, cash buffer, margin, short sales,
-  options and crypto, malformed or bad bracket orders, duplicates and a daily
-  order limit. Getting out is never blocked by a day limit. Prints PASS or
-  BLOCK with the reason and records the verdicts so trader-broker only shows
-  an order that passed. Use when the user says "check my order", "is this
-  safe", "risk check", "does this break my rules", "can I take this trade",
-  "how much have I risked today", or before /trader-broker, always.
-argument-hint: "[path to orders.json]"
+  Risk Manager for EGX. Checks every proposed order in trader/orders.json
+  against your limits before you enter it: max loss per trade and per day,
+  trades per day, reward to risk, a stop on every entry, the Cairo entry
+  window (10:15 to 14:00, earlier in Ramadan), EGX holidays and weekends
+  (Friday and Saturday), position size, cash and your blocked list, and
+  whether the stock is on EGX's same-day (T+0) list. PASS or BLOCK with the
+  reasons, recorded with a fingerprint so /trader-broker only shows an order
+  as ready if that exact order passed today. Use when the user says "check
+  this trade", "is this within my limits", "risk check", or after /trader-budget.
+argument-hint: "[--orders trader/orders.json] [--now HH:MM]"
 ---
 
 # trader-risk
 
-The Risk Manager is the gate between a proposal and the broker. Every order
-written by trader-budget or trader-broker's flatten passes through it. A
-BLOCK is final for that order: it does not go to the user for a yes, and it
-does not go to the broker. Most people who day trade lose money. These limits
-keep each loss and each day's losses small. They do not make a trade win.
+The last check before a ticket. Every rule is the user's own, from
+`trader/config.json`. Amounts in EGP.
 
 `${CLAUDE_SKILL_DIR}` below is this skill's folder (where this SKILL.md lives).
 
 ```bash
-python3 "${CLAUDE_SKILL_DIR}/check.py"                           # trader/ files; writes trader/state/risk.json
-python3 "${CLAUDE_SKILL_DIR}/check.py" --json
-python3 "${CLAUDE_SKILL_DIR}/check.py" --no-write                # look without recording
-python3 "${CLAUDE_SKILL_DIR}/check.py" --now "2026-10-19 10:15"  # pin the clock (New York time)
+python3 "${CLAUDE_SKILL_DIR}/check.py"                      # writes trader/state/risk.json
+python3 "${CLAUDE_SKILL_DIR}/check.py" --now "2026-11-03 10:26"
+python3 "${CLAUDE_SKILL_DIR}/check.py" --json --no-write
 ```
 
-## What it reads and writes
+## What blocks an entry
 
-| file | what |
+| rule | blocks when |
 | --- | --- |
-| `trader/orders.json` | the proposed orders (trader-budget, or trader-broker's flatten) |
-| `trader/config.json` | the limits (trader-budget ships `config.example.json`) |
-| `trader/portfolio.json` | cash and holdings; if missing, a fresh account funded with the budget |
-| `trader/prices.json` | a fresh price raises the entry it measures risk from; also values holdings |
-| `trader/state/broker.json` | what was placed today: duplicates, trades per day, daily loss, day trades |
-| `trader/state/risk.json` | the verdicts it writes, with a fingerprint of each exact order |
+| loss | qty x (entry - stop) is over `max_loss_per_trade_egp` |
+| daily loss | today's max losses plus this one are over `max_daily_loss_egp` |
+| trades | `max_trades_per_day` entries already today |
+| stop | no stop, or a stop on the wrong side |
+| reward:risk | under `min_reward_risk` |
+| window | before 10:15, after 14:00 Cairo (13:00 on a 13:30 Ramadan close), or EGX closed (Friday, Saturday, a holiday) |
+| same-day | the stock is not on your `same_day_list`. With an empty list it is a warning on every buy: EGX lets you sell a stock the day you buy it only if it is on EGX's intraday (T+0) list |
+| size, cash, position, blocked, duplicate | the usual caps |
 
-## Entries and exits
-
-An **entry** opens or adds to a position: a buy, or a sell that would go
-short. An **exit** only reduces what you already hold. Getting out must
-always be possible, so an exit is checked for format, asset and short sales
-only. Every other rule (day limits, entry window, loss, reward:risk, blocked
-list, size, duplicates) turns into a warning for an exit, never a BLOCK.
-
-## The checks
-
-Orders are checked in file order, as if each passed order had filled, so a
-batch that is fine order by order but breaks a limit together is caught.
-
-| check | blocks when |
-| --- | --- |
-| format | no symbol, side not buy or sell, both or neither of qty and notional, a notional order that is not market + day (Alpaca's rule), a limit order with no limit price; a bracket that is not whole shares, not `day` or `gtc`, or misses its stop-loss or take-profit |
-| asset | an option symbol while `allow_options` is false; crypto or anything that is not a US stock or ETF ticker |
-| short | a sell of more than you hold (`allow_short` false) |
-| blocked | (entries) the ticker is on the `blocked` list |
-| size | (entries) under `min_order_usd` or over `max_order_usd` |
-| position | (entries) the stock would be over `max_position_pct` of the account |
-| cash | (entries) the buy would leave less than the cash buffer, or need margin |
-| stop | (entries) no stop while `require_stop` is true (a bracket `stop_loss_stop_price`, or the order's plan stop); a stop on the wrong side of the entry |
-| loss | (entries) qty x (entry minus stop) over `max_loss_per_trade_usd` |
-| reward:risk | (entries) (target minus entry) / (entry minus stop) under `min_reward_risk` |
-| daily loss | (entries) the max losses at the stops of today's entries, plus this one, over `max_daily_loss_usd` |
-| trades | (entries) `max_trades_per_day` entries already placed today |
-| window | (entries) before `no_entries_before` or after `no_entries_after`, or the market is closed |
-| pdt | (entries, only with `pdt_guard` true) 3 day trades already in the last 5 business days |
-| duplicate | (entries) the same symbol and side twice in one batch, or already placed today |
-| daily limit | (entries) `max_orders_per_day` orders already placed today |
-
-How the numbers work:
-
-- **The entry it measures from**: the limit price for a limit order. For a
-  market order, the HIGHER of the plan's entry and a fresh price from
-  `trader/prices.json` (under 15 minutes old). A plan written at 10:15 cannot
-  understate the risk at 10:55 after the price ran up. An older price is not
-  used, and it says so.
-- **Daily loss** counts the full max loss of every entry placed today, win or
-  lose, as trader-broker logged it. Three full-size trades use up a $150 day.
-- **The window** is New York time, worked out in the tool (daylight saving
-  included), never from the computer's clock zone. Weekends and NYSE holidays
-  are closed. On a 1:00 p.m. early close the window ends 3 hours earlier too.
-  Set both `no_entries_*` to null to switch the window off.
-- **pdt_guard** (off by default) counts a day trade as a symbol bought and
-  sold on the same day in the log, plus any entry placed today (it is meant
-  to be flat by the close). FINRA removed the $25,000 pattern-day-trader
-  minimum (Regulatory Notice 26-10, effective June 4, 2026; firms may phase
-  in until October 20, 2027), so some brokers still apply the old rule: turn
-  `pdt_guard` on if yours does.
-
-Warnings do not block, but say them to the user: a LIVE account, a number
-sent as a number instead of a string, a stop that lives only in the plan and
-not at the broker, a price too old to use, an early close today.
+An exit (a sell of what you hold) is never blocked by the day limits:
+getting out must always be possible.
 
 ## Steps
 
-1. If the price may have moved since the plan, refresh it first
-   (trader-alerts: `alerts.py quote TSLA --write`).
-2. Run `check.py`. Exit code 0 means every order passed, 1 means at least one
-   was blocked.
-3. Tell the user the result in plain words, order by order: the max loss at
-   the stop, reward:risk, and how much of today's limits it uses. For a
-   BLOCK, give the reason and the fix (fewer shares, a closer stop from
-   trader-exit, wait for the window, or skip the trade). Never change a
-   limit yourself.
-4. If the order changes in any way, run the check again. trader-broker matches
-   each order to its verdict by fingerprint, so an edited order is not ready
-   until it passes again, and a verdict from yesterday does not count today.
+1. Run `check.py` after `/trader-budget --write`.
+2. Say PASS or BLOCK for each order with the reasons, and every warning
+   (especially same-day and the 15-minute data delay).
+3. On PASS, hand off to `/trader-broker` for the ticket. On BLOCK, stop.
 
-## Example: the reel
-
-The TSLA bracket from trader-budget at 10:15 AM on Monday 2026-10-19, on a
-fresh $5,000 paper account with the example config:
+## Example
 
 ```
-PASS  #1 buy TSLA 8 shares, entry
-          entry 364.18 (the plan's entry), stop 358.32, target 370.04: risk 5.86 a share
-          max loss $46.88 (limit $50), reward:risk 1.00 (min 1)
-          today before this: 0 of 3 trades, $0 of $150 daily loss
-
-1 passed, 0 blocked at 2026-10-19 10:15 New York. Cash after the passed orders: $2,086.56 (paper account).
+PASS  #1 buy COMI 306 shares, entry
+          entry 122.41 (the plan's entry), stop 121.75, target 123.07: risk 0.66 a share
+          max loss EGP 201.96 (limit EGP 500), reward:risk 1.00 (min 1)
+        ~ same-day: check that COMI is on EGX's intraday (T+0) trading list before you buy ...
+1 passed, 0 blocked at 2026-11-03 10:26 Cairo.
 ```
-
-One more share and it is blocked:
-
-```
-BLOCK #1 buy TSLA 9 shares, entry
-          entry 364.18 (the plan's entry), stop 358.32, target 370.04: risk 5.86 a share
-          max loss $52.74 (limit $50), reward:risk 1.00 (min 1)
-          today before this: 0 of 3 trades, $0 of $150 daily loss
-        - loss: 9 shares x 5.86 risk a share = $52.74 at the stop, over your $50 max loss per trade
-```
-
-The same 8 shares checked at 10:55 with the real 10:52 quote (366.48) in
-`trader/prices.json` are blocked twice: 8 x 8.16 = $65.28 at the stop, and
-reward:risk 0.44. At 9:40 they are blocked by the window (no new entries
-before 9:45). The 3:55 PM sell that closes the position passes, even though
-it is after the 3:30 entry cutoff: it is an exit.
-
-## Rules
-
-- A PASS only means the order is allowed to be shown to the user. It is not a yes.
-- Every number comes from the config, the order, the portfolio, the prices or the broker log.
-- Free Yahoo prices are unofficial and can lag; the broker's price is the one that fills, and a
-  stop can fill worse than its price in a fast market.
 
 ## What it never does
 
-It never places an order, never edits an order to make it pass, never
-loosens a limit, never blocks a sell that only gets the user out, and never
-treats a PASS as the user's yes.
+It never places, edits or approves an order, and never loosens a rule.
 
 ## Safety
 
-- Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.
+- Not financial advice. This is software that reads public data and does arithmetic. A PASS is a rules
+  check, not a recommendation. Most people who day trade lose money.
 - Paper trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
-- Nothing in this pack places an order except trader-broker, and only when all three hold: trader-risk
-  passed that exact order today, the user typed an explicit yes for that one order in the chat, and the
-  user clicked Allow once on Claude's own card because the order tool is set to "Needs approval"
-  (Customize > Connectors > tool permissions). Never set an order tool to "Always allow".
-- No options, margin, short selling or leverage unless the config allows it and the user confirms.
-- Broker keys live in environment variables or the Claude Desktop config, never in the chat.
+- Nothing in this pack places an order. The broker (Telda) has no API: every order is a ticket the user
+  types in by hand, and only after trader-risk passed that exact order today and the user said an explicit
+  yes to that one ticket in the chat. Never ask for logins, PINs, card or account details.
+- Prices are TradingView's free EGX feed, DELAYED 15 MINUTES. Say so on every signal and ticket, and tell
+  the user to check the live price in their broker app before acting. Never present a delayed price as live.
+- The 5-minute rule: every action gets a warning at least 5 minutes before the user has to act, whenever
+  the clock or the price allows it. A trigger that came without one is LATE: skip it or recheck it.
+- No options, margin, short selling or leverage. A day trade needs a stock on EGX's intraday (T+0) list,
+  the only stocks that can be sold the same day they are bought.
