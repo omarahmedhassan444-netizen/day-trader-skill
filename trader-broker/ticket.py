@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
-"""Order tickets and the decision log for trader-broker. Standard library only.
+"""Order tickets and the decision log for trader-broker: EGX edition, by hand.
 
-This tool never talks to a broker and never places anything. It does its
-work around the one moment that matters, your yes:
+Your broker (Telda) has no API, so this tool never talks to a broker and never
+places anything. It prints each order as a ticket you type into the app
+yourself, and keeps the log the risk check reads:
 
-  show      renders each proposed order as a plain-English ticket plus the
-            exact JSON Claude will send to Alpaca's place_stock_order tool.
-            A bracket order shows its stop-loss, take-profit and the max loss
-            at the stop. An order is READY only if trader-risk passed THIS
-            exact order today (matched by fingerprint) and nobody has decided
-            on it yet.
+  show      renders each proposed order as a plain ticket: what to enter in
+            your broker app, step by step, with the stop-loss, the take-profit
+            and the max loss at the stop. An order is READY only if
+            trader-risk passed THIS exact order today (matched by fingerprint)
+            and you have not decided on it yet.
   approve   records your explicit yes for ONE order, with your reply word for
             word. It refuses "yes to all", "sure", "ok", a yes that names a
             different stock or amount, and any order that is not READY.
   decline   records a no.
-  result    records what happened after the Allow once / Deny card:
-            placed (with the broker's order id), denied, or failed.
-  fill      records a fill in trader/portfolio.json (cash and shares).
+  result    records what you did in the app: placed (you entered it), skipped,
+            or failed (the app refused it). --status entered is the same as placed.
+  fill      records a fill in trader/portfolio.json (cash and shares): the
+            price the app shows you, not the delayed chart price.
   flatten   builds a sell ticket that closes a symbol's open position by
             flat_by. It still goes through trader-risk and your yes.
   log       prints today's decisions.
@@ -24,13 +25,17 @@ work around the one moment that matters, your yes:
     python3 ticket.py show                    # every order, READY or not
     python3 ticket.py show --index 1 --json   # one ticket as JSON
     python3 ticket.py approve --index 1 --reply "yes"
-    python3 ticket.py result --index 1 --status placed --broker-id 61e6...
-    python3 ticket.py fill --symbol TSLA --side buy --qty 8 --price 364.20
-    python3 ticket.py flatten --symbol TSLA --qty 8
+    python3 ticket.py result --index 1 --status placed
+    python3 ticket.py fill --symbol COMI --side buy --qty 306 --price 122.45
+    python3 ticket.py flatten --symbol COMI --qty 306
     python3 ticket.py log
 
+Paper trading ("paper": true, the default): do NOT enter the order in the
+app. Record it with result and fill as if it had filled, and compare later.
+
 Everything is written to trader/state/broker.json (append only). Dates are
-New York dates; --now "2026-10-19 10:15" pins the clock.
+Cairo dates; --now "2026-11-03 10:26" pins the clock. Amounts are EGP.
+Not financial advice.
 """
 
 import argparse
@@ -40,6 +45,9 @@ import json
 import os
 import re
 import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "trader-egx"))
+import egx_data as E  # noqa: E402
 
 ALPACA_FIELDS = ("symbol", "side", "qty", "notional", "type", "time_in_force", "limit_price",
                  "stop_price", "trail_price", "trail_percent", "extended_hours", "client_order_id",
@@ -59,55 +67,29 @@ class TicketError(Exception):
     pass
 
 
-# ---------------------------------------------------------------- time (New York, no tz files)
+# ---------------------------------------------------------------- time (Cairo, through trader-egx)
 
-def _nth_sunday(year, month, n):
-    d = datetime.date(year, month, 1)
-    d += datetime.timedelta(days=(6 - d.weekday()) % 7)
-    return d + datetime.timedelta(weeks=n - 1)
-
-
-def eastern_offset(utc):
-    """Hours from UTC for New York: -4 in daylight time, -5 otherwise.
-    DST runs from 2:00 a.m. on the second Sunday of March to 2:00 a.m. on the
-    first Sunday of November (US rule since 2007)."""
-    y = utc.year
-    start = datetime.datetime.combine(_nth_sunday(y, 3, 2), datetime.time(7, 0))   # 2:00 EST
-    end = datetime.datetime.combine(_nth_sunday(y, 11, 1), datetime.time(6, 0))    # 2:00 EDT
-    naive = utc.replace(tzinfo=None)
-    return -4 if start <= naive < end else -5
-
-
-def to_eastern(utc):
-    return utc.replace(tzinfo=None) + datetime.timedelta(hours=eastern_offset(utc))
-
-
-def eastern_to_utc(local):
-    for off in (-4, -5):
-        utc = local - datetime.timedelta(hours=off)
-        if eastern_offset(utc) == off:
-            return utc
-    return local + datetime.timedelta(hours=5)
+to_local = E.to_cairo
+local_to_utc = E.cairo_to_utc
 
 
 def parse_now(text):
-    """ISO time -> naive UTC. A time without an offset is taken as New York time."""
+    """ISO time -> naive UTC. A time without an offset is taken as Cairo time."""
     if not text:
         return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0, tzinfo=None)
     t = text.strip().replace("Z", "+00:00")
     try:
         dt = datetime.datetime.fromisoformat(t)
     except ValueError:
-        raise TicketError("--now wants a time like \"2026-10-19 10:15\" (New York) or ...Z (UTC)")
+        raise TicketError("--now wants a time like \"2026-11-03 10:26\" (Cairo) or ...Z (UTC)")
     if dt.tzinfo is None:
-        return eastern_to_utc(dt)
+        return local_to_utc(dt)
     return (dt - dt.utcoffset()).replace(tzinfo=None)
 
 
-def ny_iso(now_utc):
-    """naive UTC -> "2026-10-19T10:15:00-04:00" (New York wall clock with its offset)."""
-    off = eastern_offset(now_utc)
-    return "%s%+03d:00" % (to_eastern(now_utc).replace(microsecond=0).isoformat(), off)
+def local_iso(now_utc):
+    """naive UTC -> "2026-11-03T10:26:00+02:00" (Cairo wall clock with its offset)."""
+    return "%s%+03d:00" % (to_local(now_utc).replace(microsecond=0).isoformat(), E.cairo_offset(now_utc))
 
 
 # ---------------------------------------------------------------- files
@@ -166,9 +148,8 @@ def _f(x):
 
 
 def tool_input(order):
-    """The exact arguments for place_stock_order: Alpaca's parameter names,
-    numbers as strings (its signature types qty, notional and prices as str).
-    "why" and "plan" are ours and are never sent."""
+    """The order's own fields, numbers as strings: the ticket as data.
+    "why" and "plan" are ours, for you to read."""
     out = {}
     for k in ALPACA_FIELDS:
         if k in order and order[k] is not None:
@@ -179,11 +160,12 @@ def tool_input(order):
 def _money(v):
     f = float(v)
     s = "{:,.2f}".format(f)
-    return "$" + (s[:-3] if s.endswith(".00") else s)
+    return "EGP " + (s[:-3] if s.endswith(".00") else s)
 
 
 def _p(v):
-    return "%.2f" % float(v)
+    """EGX prices: 0.01 EGP steps, 0.001 under 1 EGP."""
+    return ("%.3f" if 0 < float(v) < 1 else "%.2f") % float(v)
 
 
 def is_bracket(order):
@@ -193,7 +175,7 @@ def is_bracket(order):
 
 
 def max_loss(order):
-    """(dollars, stop) lost if the stop fills exactly at the stop, or (None, stop)."""
+    """(EGP, stop) lost if the stop fills exactly at the stop, or (None, stop)."""
     stop = _f(order.get("stop_loss_stop_price")) or _f((order.get("plan") or {}).get("stop"))
     q = _f(order.get("qty"))
     if not stop or not q:
@@ -208,7 +190,8 @@ def max_loss(order):
     if not entry:
         return None, stop
     risk = abs(entry - stop)
-    return round(q * int(round(risk * 100)) / 100.0, 2), stop
+    sc = 1000 if entry < 1 else 100
+    return round(q * int(round(risk * sc)) / float(sc), 2), stop
 
 
 def plain_parts(order):
@@ -249,8 +232,8 @@ def plain_parts(order):
 
 
 def plain(order):
-    """BUY $1,250 of AAPL, market order, good for today
-    BUY 8 TSLA, market, good for today / stop-loss 358.32 / take-profit 370.04 / max loss about $46.88 ..."""
+    """BUY EGP 10,000 of COMI, market order, good for today
+    BUY 306 COMI, market, good for today / stop-loss 121.75 / take-profit 123.07 / max loss about EGP 201.96 ..."""
     return " / ".join(plain_parts(order))
 
 
@@ -335,7 +318,7 @@ def status_of(order, risk, state, today):
     if rec:
         st = rec.get("status")
         if st == "approved":
-            return False, "APPROVED by you at %s, waiting for the place_stock_order call" % rec.get("at"), rv
+            return False, "APPROVED by you at %s, waiting for you to enter it (then ticket.py result)" % rec.get("at"), rv
         return False, "DONE: %s at %s" % (st, rec.get("at")), rv
     return True, "READY: trader-risk PASS, waiting for your yes", rv
 
@@ -349,12 +332,49 @@ def kind_of(order, rv):
 
 # ---------------------------------------------------------------- rendering
 
+def app_name(cfg):
+    b = str(cfg.get("broker") or "telda").strip()
+    return "Telda" if b.lower() == "telda" else (b or "your broker app")
+
+
+def entry_steps(order, cfg):
+    """What to type into the app, in order. Telda has no API: you do it by hand."""
+    app = app_name(cfg)
+    q = _str_num(order.get("qty")) if order.get("qty") is not None else None
+    sym = order.get("symbol", "?")
+    side = str(order.get("side", "")).upper()
+    typ = str(order.get("type", "market"))
+    if order.get("notional") is not None and q is None:
+        what = "%s worth of %s" % (_money(order["notional"]), sym)
+    else:
+        what = "%s share%s of %s" % (q, "" if q == "1" else "s", sym)
+    if typ == "limit" and order.get("limit_price") is not None:
+        how = "a LIMIT order at %s" % _p(order["limit_price"])
+    else:
+        how = "a MARKET order"
+    steps = ["In %s: %s %s, %s, good for today." % (app, side, what, how)]
+    if is_bracket(order):
+        if order.get("stop_loss_stop_price") is not None:
+            steps.append("Stop-loss: SELL %s %s if the price falls to %s. If %s has no stop order for EGX, "
+                         "trader-alerts rings at %s and you sell by hand." % (
+                             q, sym, _p(order["stop_loss_stop_price"]), app, _p(order["stop_loss_stop_price"])))
+        if order.get("take_profit_limit_price") is not None:
+            steps.append("Take-profit: SELL %s %s at %s (a limit order, or sell by hand when trader-alerts "
+                         "rings). Only one sell can use the shares: if one fills, cancel the other." % (
+                             q, sym, _p(order["take_profit_limit_price"])))
+    flat = (order.get("plan") or {}).get("flat_by") or cfg.get("flat_by")
+    if flat and side == "BUY":
+        steps.append("Flat by %s Cairo: sell whatever is still open (the warning comes 5+ minutes before)." % flat)
+    steps.append("Check the live price in %s first: the charts here are 15 minutes late." % app)
+    return steps
+
+
 def render(order, idx, total, cfg, risk, state, today):
     ready, label, rv = status_of(order, risk, state, today)
-    broker = str(cfg.get("broker", "alpaca")).lower()
     paper = cfg.get("paper", True)
-    acct = "PAPER account" if paper else "LIVE ACCOUNT, REAL MONEY"
-    lines = ["ORDER %d of %d, %s, %s" % (idx, total, acct, "Interactive Brokers" if broker == "ibkr" else "Alpaca")]
+    app = app_name(cfg)
+    acct = ("PAPER: practice only, do NOT enter it in %s" % app) if paper else ("REAL MONEY: you enter it in %s" % app)
+    lines = ["ORDER %d of %d, %s" % (idx, total, acct)]
     for part in plain_parts(order):
         lines.append("  " + part)
     if order.get("why"):
@@ -362,20 +382,13 @@ def render(order, idx, total, cfg, risk, state, today):
     lines.append("  " + label)
     for w in (rv or {}).get("warnings", []):
         lines.append("  note: " + w)
-    if broker == "ibkr":
-        lines.append("  Claude drafts this with the Interactive Brokers connector. IBKR sends it to your")
-        lines.append("  IBKR account, and it only goes to the market after you approve it there.")
-    else:
-        lines.append("  Claude will call place_stock_order with exactly:")
-        for l in json.dumps(tool_input(order), indent=2).splitlines():
-            lines.append("    " + l)
-        if is_bracket(order):
-            lines.append("  Alpaca places the entry, then the stop-loss and the take-profit as two orders")
-            lines.append("  that cancel each other: when one fills, the other is canceled.")
+    lines.append("  To enter it yourself:")
+    for i, step in enumerate(entry_steps(order, cfg), 1):
+        lines.append("    %d. %s" % (i, step))
     if ready:
-        lines.append("  Reply \"yes\" to place this one order, or \"no\" to skip it.")
-        if broker != "ibkr":
-            lines.append("  Claude's own card then asks again: Allow once places it, Deny stops it.")
+        lines.append("  Reply \"yes\" to take this one trade, or \"no\" to skip it. Nothing is sent anywhere:")
+        lines.append("  %s" % ("record it as a paper trade." if paper else
+                               "you place it in %s, then: ticket.py result --index %d --status placed" % (app, idx)))
     return "\n".join(lines), ready
 
 
@@ -384,8 +397,8 @@ def ticket_json(order, idx, cfg, risk, state, today):
     loss, stop = max_loss(order)
     return {"index": idx, "ready": ready, "status": label, "plain": plain(order),
             "fingerprint": fingerprint(order), "paper": bool(cfg.get("paper", True)),
-            "broker": cfg.get("broker", "alpaca"), "tool": "place_stock_order",
-            "tool_input": tool_input(order), "why": order.get("why", ""),
+            "broker": cfg.get("broker", "telda"), "manual": True, "steps": entry_steps(order, cfg),
+            "ticket": tool_input(order), "why": order.get("why", ""),
             "bracket": is_bracket(order), "max_loss": loss, "stop": stop}
 
 
@@ -443,7 +456,7 @@ def log_fill(state_path, now, today, symbol, side, qty, price):
     """A fill in the log, so trader-risk can count day trades (a buy and a sell the same day)."""
     state = load_state(state_path)
     state.setdefault("orders", []).append({
-        "at": ny_iso(now), "date": today, "status": "filled", "symbol": symbol.upper(), "side": side,
+        "at": local_iso(now), "date": today, "status": "filled", "symbol": symbol.upper(), "side": side,
         "qty": _str_num(float(qty)), "price": float(price),
         "plain": "%s %s %s at %s" % (side.upper(), _str_num(float(qty)), symbol.upper(), _p(price))})
     write_json(state_path, state)
@@ -453,7 +466,7 @@ def log_fill(state_path, now, today, symbol, side, qty, price):
 
 def _clock(a):
     now = parse_now(getattr(a, "now", None))
-    today = getattr(a, "today", None) or to_eastern(now).date().isoformat()
+    today = getattr(a, "today", None) or to_local(now).date().isoformat()
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", today):
         raise TicketError("--today wants a date like 2026-10-19")
     return now, today
@@ -508,33 +521,34 @@ def cmd_approve(a):
         print("Not recorded: %s. Ask the user again with the ticket for order %d." % (why, a.index))
         return 1
     loss, stop = max_loss(order)
-    rec = {"at": ny_iso(now), "date": today, "index": a.index, "fingerprint": fingerprint(order),
+    rec = {"at": local_iso(now), "date": today, "index": a.index, "fingerprint": fingerprint(order),
            "symbol": str(order.get("symbol", "")).upper(), "side": order.get("side"),
            "qty": order.get("qty"), "kind": kind_of(order, rv), "max_loss": loss, "stop": stop,
            "plain": plain(order), "status": "approved", "reply": a.reply,
-           "paper": bool(cfg.get("paper", True)), "broker": cfg.get("broker", "alpaca")}
+           "paper": bool(cfg.get("paper", True)), "broker": cfg.get("broker", "telda")}
     state.setdefault("orders", []).append(rec)
     write_json(a.state, state)
     print("Recorded your yes for order %d: %s." % (a.index, plain(order)))
-    if str(cfg.get("broker", "alpaca")).lower() == "ibkr":
-        print("Now draft it with the Interactive Brokers connector; approve it in your IBKR account.")
+    if cfg.get("paper", True):
+        print("Paper trade: do NOT enter it in %s. Record it: ticket.py result --index %d --status placed, "
+              "then ticket.py fill with the price you would have paid." % (app_name(cfg), a.index))
     else:
-        print("Now call place_stock_order with exactly:")
-        print(json.dumps(tool_input(order), indent=2))
-        print("Claude's card shows Allow once / Deny. Then: ticket.py result --index %d --status "
-              "placed|denied|failed" % a.index)
+        print("Now enter it yourself in %s:" % app_name(cfg))
+        for i, step in enumerate(entry_steps(order, cfg), 1):
+            print("  %d. %s" % (i, step))
+        print("Then: ticket.py result --index %d --status placed (or skipped / failed)." % a.index)
     return 0
 
 
 def cmd_decline(a):
     orders, cfg, risk, state, today, now = _load(a)
     order = _pick(orders, a.index)
-    rec = {"at": ny_iso(now), "date": today, "index": a.index, "fingerprint": fingerprint(order),
+    rec = {"at": local_iso(now), "date": today, "index": a.index, "fingerprint": fingerprint(order),
            "symbol": str(order.get("symbol", "")).upper(), "side": order.get("side"),
            "plain": plain(order), "status": "declined", "reply": a.reply or "no"}
     state.setdefault("orders", []).append(rec)
     write_json(a.state, state)
-    print("Recorded: you said no to order %d (%s). Nothing was sent." % (a.index, plain(order)))
+    print("Recorded: you said no to order %d (%s). Nothing to enter." % (a.index, plain(order)))
     return 0
 
 
@@ -545,8 +559,9 @@ def cmd_result(a):
     rec = latest(state, fp, today)
     if not rec or rec.get("status") != "approved":
         raise TicketError("order %d has no yes recorded today; a result can only follow an approval" % a.index)
-    new = {"at": ny_iso(now), "date": today, "index": a.index, "fingerprint": fp, "symbol": rec["symbol"],
-           "side": rec["side"], "plain": rec["plain"], "status": a.status}
+    status = "placed" if a.status == "entered" else ("declined" if a.status == "skipped" else a.status)
+    new = {"at": local_iso(now), "date": today, "index": a.index, "fingerprint": fp, "symbol": rec["symbol"],
+           "side": rec["side"], "plain": rec["plain"], "status": status}
     for k in ("qty", "kind", "max_loss", "stop"):
         if rec.get(k) is not None:
             new[k] = rec[k]
@@ -556,13 +571,13 @@ def cmd_result(a):
         new["note"] = a.note
     state["orders"].append(new)
     write_json(a.state, state)
-    print("Recorded order %d as %s." % (a.index, a.status))
-    if a.status == "placed" and a.filled_qty and a.filled_price:
+    print("Recorded order %d as %s." % (a.index, status))
+    if status == "placed" and a.filled_qty and a.filled_price:
         apply_fill(a.portfolio, cfg, rec["symbol"], rec["side"], a.filled_qty, a.filled_price, today)
         log_fill(a.state, now, today, rec["symbol"], rec["side"], a.filled_qty, a.filled_price)
         print("Added the fill to %s." % a.portfolio)
-    elif a.status == "placed":
-        print("When it fills, record it: ticket.py fill --symbol %s --side %s --qty Q --price P"
+    elif status == "placed":
+        print("When it fills, record it with the price your app shows: ticket.py fill --symbol %s --side %s --qty Q --price P"
               % (rec["symbol"], rec["side"]))
         if rec.get("kind") == "entry" and is_bracket(order):
             print("When the stop-loss or the take-profit fills later, record that sell the same way.")
@@ -572,9 +587,9 @@ def cmd_result(a):
 def cmd_fill(a):
     cfg = read_json(a.config, "config", required=False) or {}
     now = parse_now(a.now)
-    date = a.date or to_eastern(now).date().isoformat()
+    date = a.date or to_local(now).date().isoformat()
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
-        raise TicketError("--date wants a date like 2026-10-19")
+        raise TicketError("--date wants a date like 2026-11-03")
     pf = apply_fill(a.portfolio, cfg, a.symbol, a.side, a.qty, a.price, date)
     log_fill(a.state, now, date, a.symbol, a.side, a.qty, a.price)
     print("Recorded %s %s %s at %s on %s in %s. Cash now %s." % (a.side, a.qty, a.symbol.upper(),
@@ -587,7 +602,7 @@ def cmd_flatten(a):
     cfg = read_json(a.config, "config", required=False) or {}
     sym = a.symbol.strip().upper()
     now, today = _clock(a)
-    source = "the broker, get_open_position"
+    source = "your broker app"
     if a.qty is not None:
         qty = _f(a.qty)
         if qty is None or qty <= 0:
@@ -598,33 +613,32 @@ def cmd_flatten(a):
                   if str(p.get("ticker") or p.get("symbol") or "").upper() == sym)
         source = a.portfolio
         if qty <= 1e-9:
-            raise TicketError("nothing to flatten: no %s shares in %s. Check the broker (get_open_position "
-                              "%s) and pass --qty if you do hold some" % (sym, a.portfolio, sym))
+            raise TicketError("nothing to flatten: no %s shares in %s. Check your broker app and pass --qty "
+                              "if you do hold some" % (sym, a.portfolio))
     plan = read_json(a.plan, "plan", required=False) or {}
     flat_by = (plan.get("flat_by") if str(plan.get("symbol", "")).upper() == sym else None) \
-        or cfg.get("flat_by") or "15:55"
+        or cfg.get("flat_by") or "14:20"
     order = {"symbol": sym, "side": "sell", "qty": _str_num(qty), "type": "market", "time_in_force": "day",
-             "why": "flat by %s New York: closes the %s day trade before the close (qty from %s)"
+             "why": "flat by %s Cairo: closes the %s day trade before the close (qty from %s)"
              % (flat_by, sym, source)}
     old = read_json(a.orders, "orders", required=False)
     replaced = len(old.get("orders", [])) if isinstance(old, dict) else 0
     doc = {"created_by": "trader-broker", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "status": "proposed",
            "paper": bool(cfg.get("paper", True)),
-           "note": "Flatten ticket. Nothing is placed until trader-risk passes it and you say yes in the chat.",
+           "note": "Flatten ticket. Nothing is placed: once trader-risk passes it, you sell yourself in your broker app.",
            "source": "ticket.py flatten %s on %s" % (sym, today), "orders": [order]}
     write_json(a.orders, doc)
-    print("Flatten %s: %s (flat by %s New York)." % (sym, plain(order), flat_by))
+    print("Flatten %s: %s (flat by %s Cairo)." % (sym, plain(order), flat_by))
     print("Wrote it to %s%s." % (a.orders, (" (it replaced %d earlier proposal%s)"
                                              % (replaced, "" if replaced == 1 else "s")) if replaced else ""))
     if a.qty is None:
-        print("The qty comes from %s. Check it against get_open_position %s before you say yes." % (source, sym))
+        print("The qty comes from %s. Check it against the shares your broker app shows before you sell." % source)
     print("Next:")
     print("  1. trader-risk: check.py. A sell that only closes what you hold is never blocked by the daily")
     print("     limits or the entry window.")
-    print("  2. ticket.py show, then the user's yes for this one order.")
-    print("  3. If the bracket's stop-loss and take-profit are still open, Alpaca holds these shares for them")
-    print("     and rejects a new sell. Cancel them first: get_orders (status open, nested true), then")
-    print("     cancel_order_by_id for each open leg (Needs approval). Then place_stock_order with the ticket.")
+    print("  2. ticket.py show, then your yes for this one order.")
+    print("  3. In your broker app, cancel any open stop-loss or take-profit sell for these shares first,")
+    print("     then sell them at market. Record it: ticket.py result, then ticket.py fill.")
     return 0
 
 
@@ -651,8 +665,8 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd")
 
     def clock(p):
-        p.add_argument("--now", help="pretend it is this New York time, e.g. \"2026-10-19 10:15\"")
-        p.add_argument("--today", help="YYYY-MM-DD (default: today in New York)")
+        p.add_argument("--now", help="pretend it is this Cairo time, e.g. \"2026-11-03 10:26\"")
+        p.add_argument("--today", help="YYYY-MM-DD (default: today in Cairo)")
 
     def common(p):
         p.add_argument("--orders", default="trader/orders.json")
@@ -673,10 +687,10 @@ def main(argv=None):
     common(p)
     p.add_argument("--index", type=int, required=True)
     p.add_argument("--reply")
-    p = sub.add_parser("result", help="record what happened after the Allow once / Deny card")
+    p = sub.add_parser("result", help="record what you did in the app: placed (entered), skipped or failed")
     common(p)
     p.add_argument("--index", type=int, required=True)
-    p.add_argument("--status", required=True, choices=["placed", "denied", "failed"])
+    p.add_argument("--status", required=True, choices=["placed", "entered", "skipped", "denied", "failed"])
     p.add_argument("--broker-id")
     p.add_argument("--note")
     p.add_argument("--filled-qty")
@@ -687,14 +701,14 @@ def main(argv=None):
     p.add_argument("--side", required=True, choices=["buy", "sell"])
     p.add_argument("--qty", required=True)
     p.add_argument("--price", required=True)
-    p.add_argument("--date", help="YYYY-MM-DD (default: today in New York)")
+    p.add_argument("--date", help="YYYY-MM-DD (default: today in Cairo)")
     p.add_argument("--now")
     p.add_argument("--portfolio", default="trader/portfolio.json")
     p.add_argument("--config", default="trader/config.json")
     p.add_argument("--state", default="trader/state/broker.json")
     p = sub.add_parser("flatten", help="a sell ticket that closes a symbol's position by flat_by")
     p.add_argument("--symbol", required=True)
-    p.add_argument("--qty", help="shares you hold, from get_open_position (default: trader/portfolio.json)")
+    p.add_argument("--qty", help="shares you hold, from your broker app (default: trader/portfolio.json)")
     p.add_argument("--orders", default="trader/orders.json", help="where the ticket is written")
     p.add_argument("--portfolio", default="trader/portfolio.json")
     p.add_argument("--plan", default="trader/plan.json")
