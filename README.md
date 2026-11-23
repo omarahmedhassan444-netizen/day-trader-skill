@@ -11,9 +11,13 @@ the EGX session calendar, the stock list, fundamentals and headlines, plus
 Daily News Egypt. One package to install (`websocket-client`), no signup, no
 API key.
 
-**The data is 15 minutes late.** Without a TradingView login, TradingView's
-EGX feed is delayed 15 minutes. Every signal, quote and ticket says so. The
-price in your broker app is the one that fills: check it before you act.
+**The free data is 15 minutes late.** Without a TradingView login, TradingView's
+EGX feed is delayed 15 minutes. Every signal, quote and ticket says how late
+its data is. For real-time data, subscribe to TradingView's Egyptian Exchange
+real-time data ($14.95 a month on its Market Data page) and run
+`python3 trader-egx/egx_data.py login` once on your own computer (see
+`trader-egx/SKILL.md`). The price in your broker app is the one that fills:
+check it before you act.
 
 **Nothing in this pack places an order.** Your broker (Telda) has no API.
 Every order is a ticket you type into the app yourself, after `/trader-risk`
@@ -159,8 +163,9 @@ after `/trader-risk` passes that exact order, and only one ticket per yes.
 **Paper first.** `"paper": true` is the default in `config.example.json`:
 the tickets say "do NOT enter it" and the trades are logged as practice.
 
-**The data is free, unofficial and 15 minutes late.** TradingView's EGX
-feed without a login is delayed 15 minutes, and the scanner and the entry
+**The data is unofficial, and free data is 15 minutes late.** TradingView's EGX
+feed without a login is delayed 15 minutes (real-time with your own
+subscription and `egx_data.py login`, licensed for your own use only), and the scanner and the entry
 timer read 1-minute or 5-minute bars, not every trade. EGX is thinner than
 the big markets: a 5-minute stretch with no trades has no bar. Check
 anything that matters against your broker app before you act.

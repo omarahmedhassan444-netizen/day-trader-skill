@@ -70,7 +70,7 @@ class Ticket(unittest.TestCase):
         self.assertTrue(steps[0].startswith("In Telda: BUY 306 shares of COMI, a MARKET order"))
         self.assertIn("If Telda has no stop order for EGX, trader-alerts rings at 121.75", text)
         self.assertIn("Flat by 14:20 Cairo", text)
-        self.assertIn("15 minutes late", text)
+        self.assertIn("15 min late", text)
 
     def test_json_ticket_is_manual(self):
         j = ticket.ticket_json(comi(), 1, {"broker": "telda", "paper": True}, None, {}, TODAY)

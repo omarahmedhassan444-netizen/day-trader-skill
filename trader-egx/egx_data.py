@@ -13,13 +13,20 @@ ALL price fetching goes through this file. The other tools import it.
     python3 egx_data.py calendar                        # today's session and the holiday list
     python3 egx_data.py calendar --refresh              # re-read hours and holidays from TradingView
 
-Data: TradingView's public feed (no login).
+Data: TradingView. Without a login, the public feed.
   prices, session, holidays  wss://data.tradingview.com/socket.io/websocket
   stock list, screening      https://scanner.tradingview.com/egypt/scan
   headlines                  https://news-headlines.tradingview.com/v2/headlines
 Without a TradingView login the EGX feed is DELAYED 15 MINUTES (TradingView
-reports "delayed_streaming_900"). Every result says how late it is. Check the
-live price in your broker app before you act.
+reports "delayed_streaming_900"). With your own TradingView account and its
+Egyptian Exchange real-time subscription ($14.95 a month on TradingView's data
+page), run `egx_data.py login` once on your own computer and the same tools
+get real-time data ("streaming"). Every result says how late it is.
+
+    python3 egx_data.py login                           # save your TradingView session (hidden input)
+    python3 egx_data.py logout                          # remove it
+The session is kept in ~/.config/egx-trader/tradingview.json (owner-only),
+or the path in EGX_TV_CREDENTIALS. Never in the repo, never in a chat.
 
 Rules this file keeps:
   - One attempt per request. No retry loops. A failure names the host and the
@@ -50,6 +57,7 @@ CALENDAR_FILE = os.path.join(HERE, "calendar.json")      # shipped with the pack
 LOCAL_CALENDAR = os.path.join("trader", "egx_calendar.json")   # written by calendar --refresh
 
 WS_HOST = "data.tradingview.com"
+PRO_HOST = "prodata.tradingview.com"    # where TradingView sends signed-in, paid users
 WS_URL = "wss://%s/socket.io/websocket" % WS_HOST
 SCAN_HOST = "scanner.tradingview.com"
 NEWS_HOST = "news-headlines.tradingview.com"
@@ -309,15 +317,144 @@ def _rand(prefix):
     return prefix + "".join(random.choice(string.ascii_lowercase) for _ in range(12))
 
 
+# ---------------------------------------------------------------- your TradingView login (real-time data)
+
+WEB_HOST = "www.tradingview.com"
+CRED_ENV = "EGX_TV_CREDENTIALS"     # a different path for the credentials file, if you want one
+COOKIE_NAMES = ("sessionid", "sessionid_sign")
+ANON_TOKEN = "unauthorized_user_token"
+_AUTH = {"token": None, "user": None, "checked": False, "note": None}
+LAST = {"delay": None}              # the delay TradingView reported on the last request
+
+
+def cred_path():
+    """Where the session cookie lives: ~/.config/egx-trader/tradingview.json (never in the repo)."""
+    return os.environ.get(CRED_ENV) or os.path.join(os.path.expanduser("~"), ".config", "egx-trader",
+                                                    "tradingview.json")
+
+
+def load_cred(path=None):
+    path = path or cred_path()
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or not doc.get("sessionid"):
+        return None
+    return {k: str(doc[k]) for k in COOKIE_NAMES if doc.get(k)}
+
+
+def save_cred(cred, path=None):
+    """Write the cookie with owner-only permissions (0600), in a 0700 folder."""
+    path = path or cred_path()
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+        try:
+            os.chmod(d, 0o700)
+        except OSError:
+            pass
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump({k: cred[k] for k in COOKIE_NAMES if cred.get(k)}, fh)
+    os.chmod(path, 0o600)
+    return path
+
+
+def parse_auth_page(html):
+    """TradingView's page -> (auth_token, username). The page sets `var user = {...}`; a signed-in
+    browser's user object carries "auth_token", a signed-out one is "Guest" with none."""
+    html = html or ""
+    i = html.find("var user = ")
+    if i < 0:
+        return None, None
+    try:
+        user, _ = json.JSONDecoder().raw_decode(html[i + len("var user = "):])
+    except ValueError:
+        return None, None
+    if not isinstance(user, dict):
+        return None, None
+    tok = user.get("auth_token")
+    return (str(tok) if tok else None), user.get("username")
+
+
+def fetch_auth_token(cred, timeout=TIMEOUT):
+    """Swap the saved session cookie for a short-lived websocket token. Raises EGXDataError."""
+    cookie = "; ".join("%s=%s" % (k, cred[k]) for k in COOKIE_NAMES if cred.get(k))
+    req = urllib.request.Request("https://%s/" % WEB_HOST,
+                                 headers={"User-Agent": UA, "Cookie": cookie, "Accept": "text/html"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            html = r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        e.close()
+        raise EGXDataError("%s answered HTTP %d" % (WEB_HOST, e.code))
+    except (urllib.error.URLError, OSError) as e:
+        raise EGXDataError("could not reach %s: %s" % (WEB_HOST, getattr(e, "reason", e)))
+    tok, user = parse_auth_page(html)
+    if not tok:
+        raise EGXDataError("TradingView did not accept the saved session (signed out or expired): run "
+                           "egx_data.py login again")
+    return tok, user
+
+
+def auth_token():
+    """The token for the websocket: yours when a login is saved and still valid, else the anonymous
+    (delayed) one. A failed login never stops the tools: they fall back to the delayed feed and say why."""
+    if _AUTH["checked"]:
+        return _AUTH["token"] or ANON_TOKEN
+    _AUTH["checked"] = True
+    cred = load_cred()
+    if not cred:
+        return ANON_TOKEN
+    try:
+        _AUTH["token"], _AUTH["user"] = fetch_auth_token(cred)
+    except EGXDataError as e:
+        _AUTH["note"] = str(e)
+        print("egx_data: %s. Using the delayed feed." % e, file=sys.stderr)
+    return _AUTH["token"] or ANON_TOKEN
+
+
+def delay_phrase(seconds="last"):
+    """" (15 min late)" for a delayed feed, "" for real-time. seconds="last" uses the last request's
+    delay, or 15 minutes when nothing has been fetched yet and no login is saved."""
+    if seconds == "last":
+        seconds = LAST["delay"]
+        if seconds is None:
+            seconds = 0 if (_AUTH["token"] or (not _AUTH["checked"] and load_cred())) else 900
+    if not seconds:
+        return ""
+    return " (%d min late)" % (seconds // 60)
+
+
+def late_sentence(seconds="last"):
+    """The sentence the tools print next to a price."""
+    ph = delay_phrase(seconds)
+    if not ph:
+        return "Prices are real-time: still check your broker app before you act."
+    return "Prices are %s late. Check the live price in your broker app before you act." % ph.strip(" ()").replace(
+        " late", "")
+
+
 def _connect():
+    """The websocket. Signed in: the pro host first (TradingView's home for paid data), then the public one."""
     try:
         from websocket import create_connection
     except ImportError:
         raise EGXDataError("the websocket-client package is missing: pip install websocket-client")
-    try:
-        return create_connection(WS_URL, header=["Origin: https://%s" % WS_HOST], timeout=TIMEOUT)
-    except Exception as e:     # proxy refusals, DNS, TLS: all name the host
-        raise EGXDataError("could not reach %s: %s" % (WS_HOST, e))
+    tok = auth_token()
+    hosts = [PRO_HOST, WS_HOST] if tok != ANON_TOKEN else [WS_HOST]
+    last = None
+    for host in hosts:
+        try:
+            return create_connection("wss://%s/socket.io/websocket" % host, header=["Origin: https://%s" % WS_HOST],
+                                     timeout=TIMEOUT)
+        except Exception as e:     # proxy refusals, DNS, TLS: all name the host
+            last = "could not reach %s: %s" % (host, e)
+    raise EGXDataError(last)
 
 
 def _converse(ws, wanted, on_msg, deadline=None):
@@ -409,7 +546,7 @@ def chart(symbols, interval="5m", n_bars=300):
     frames = {}
     sess = {}
     try:
-        ws.send(_frame("set_auth_token", ["unauthorized_user_token"]))
+        ws.send(_frame("set_auth_token", [auth_token()]))
         for s in syms:
             cs = _rand("cs_")
             sess[cs] = s
@@ -447,6 +584,8 @@ def chart(symbols, interval="5m", n_bars=300):
             continue
         ok[s] = {"symbol": s, "interval": interval, "bars": r["bars"], "update_mode": r["update_mode"],
                  "delay_seconds": delay_seconds(r["update_mode"]), "info": r["info"]}
+        if ok[s]["delay_seconds"] is not None:
+            LAST["delay"] = ok[s]["delay_seconds"]
     return {"ok": ok, "errors": errors}
 
 
@@ -479,7 +618,7 @@ def quote(symbols):
     status = {}
     ws = _connect()
     try:
-        ws.send(_frame("set_auth_token", ["unauthorized_user_token"]))
+        ws.send(_frame("set_auth_token", [auth_token()]))
         ws.send(_frame("quote_create_session", [qs]))
         ws.send(_frame("quote_add_symbols", [qs] + ["%s:%s" % (EXCHANGE, s) for s in syms]))
         seen = set()
@@ -513,6 +652,9 @@ def quote(symbols):
             errors[s] = "TradingView has no quote for %s (is it an EGX ticker?)" % s
         else:
             ok[s] = vals[s]
+            d = delay_seconds(vals[s].get("update_mode"))
+            if d is not None:
+                LAST["delay"] = d
     return {"ok": ok, "errors": errors}
 
 
@@ -727,14 +869,78 @@ def status_lines(now_utc, cal=None, delay=None):
     return out
 
 
+def login_lines(delay):
+    if _AUTH["token"]:
+        who = ("signed in as %s" % _AUTH["user"]) if _AUTH["user"] else "signed in"
+        if delay:
+            return ["TradingView login: %s, but EGX is still %s: the account has no EGX real-time data "
+                    "subscription yet (TradingView, Profile, Market data subscriptions, Egyptian Exchange)."
+                    % (who, delay_note(delay))]
+        return ["TradingView login: %s, EGX real-time." % who]
+    if _AUTH["note"]:
+        return ["TradingView login: %s." % _AUTH["note"]]
+    return ["TradingView login: none saved (%s). Run egx_data.py login on your own computer for real-time "
+            "data with your subscription." % cred_path()]
+
+
 def cmd_status(a):
     delay = None
     try:
         delay = chart_one(a.symbol, "1d", 2)["delay_seconds"]
     except EGXDataError as e:
         print("Data check failed: %s" % e)
-    for line in status_lines(utc_now(), delay=delay):
+    for line in status_lines(utc_now(), delay=delay) + login_lines(delay):
         print(line)
+    return 0
+
+
+LOGIN_HELP = """Real-time EGX data with your own TradingView subscription.
+
+1. On tradingview.com, sign in, and buy the Egyptian Exchange real-time data
+   (Profile, Market data subscriptions). Without it the feed stays 15 minutes late.
+2. In that browser, open the developer tools (F12), Application (Chrome) or
+   Storage (Firefox), Cookies, https://www.tradingview.com, and copy the values of
+   the cookies "sessionid" and "sessionid_sign".
+3. Paste them below. Input is hidden. They are saved only on this computer, in
+   %s (owner-only permissions), never in the repo
+   and never sent anywhere but tradingview.com. Never paste them into a chat.
+
+Signing out of TradingView in the browser ends this session too: run login again.
+"""
+
+
+def cmd_login(a):
+    import getpass
+    path = cred_path()
+    print(LOGIN_HELP % path)
+    sid = getpass.getpass("sessionid (hidden): ").strip()
+    sign = getpass.getpass("sessionid_sign (hidden, Enter if there is none): ").strip()
+    if not sid:
+        raise EGXDataError("no sessionid given: nothing saved")
+    cred = {"sessionid": sid}
+    if sign:
+        cred["sessionid_sign"] = sign
+    tok, user = fetch_auth_token(cred)
+    _AUTH.update(token=tok, user=user, checked=True, note=None)
+    delay = None
+    try:
+        delay = chart_one(a.symbol, "1d", 2)["delay_seconds"]
+    except EGXDataError as e:
+        print("Signed in, but the data check failed: %s" % e)
+    save_cred(cred, path)
+    print("Saved to %s." % path)
+    for line in login_lines(delay):
+        print(line)
+    return 0
+
+
+def cmd_logout(a):
+    path = cred_path()
+    if os.path.exists(path):
+        os.remove(path)
+        print("Removed %s. The tools use the free delayed feed again." % path)
+    else:
+        print("No saved login at %s." % path)
     return 0
 
 
@@ -831,6 +1037,9 @@ def main(argv=None):
     p = sub.add_parser("universe", help="every EGX stock")
     p.add_argument("--top", type=int, default=40)
     p.add_argument("--save")
+    p = sub.add_parser("login", help="save your TradingView session for real-time data (run on your own computer)")
+    p.add_argument("--symbol", default="COMI")
+    sub.add_parser("logout", help="remove the saved TradingView session")
     p = sub.add_parser("calendar", help="session hours and holidays")
     p.add_argument("--refresh", action="store_true", help="re-read them from TradingView")
     p.add_argument("--out")
@@ -841,7 +1050,7 @@ def main(argv=None):
         return 1
     try:
         return {"status": cmd_status, "chart": cmd_chart, "quote": cmd_quote, "universe": cmd_universe,
-                "calendar": cmd_calendar}[a.cmd](a)
+                "calendar": cmd_calendar, "login": cmd_login, "logout": cmd_logout}[a.cmd](a)
     except EGXDataError as e:
         print("egx_data.py: %s" % e, file=sys.stderr)
         return 1

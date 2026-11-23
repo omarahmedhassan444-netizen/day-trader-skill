@@ -73,7 +73,6 @@ LEAD_MIN = 5     # minutes of warning the trader wants before acting
 EPOCH = datetime.datetime(1970, 1, 1)
 OPEN = E.DEFAULT_OPEN
 CLOSE = E.DEFAULT_CLOSE
-DATA = "TradingView, DELAYED 15 min"
 
 
 class EntryError(Exception):
@@ -825,7 +824,7 @@ def cmd_watchlist(a):
                 ("%+.2f%%" % last["vs_level_pct"]) if last.get("vs_level_pct") is not None else "-"))
         n = sum(1 for _, r, _ in rows if r and r["status"] == "triggered")
         print("%d of %d triggered. Pick one, then: entry.py check <TICKER> --write, and /trader-exit." % (n, len(rows)))
-        print("TradingView bars, DELAYED 15 min: check the live price in your broker app. Nothing was placed.")
+        print("TradingView bars%s: check the live price in your broker app. Nothing was placed." % E.delay_phrase())
     return 0 if any(r and r["status"] == "triggered" for _, r, _ in rows) else 1
 
 

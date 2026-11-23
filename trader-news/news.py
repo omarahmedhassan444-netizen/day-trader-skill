@@ -367,7 +367,7 @@ def render_moves(moves, move_pct=MOVE_PCT):
     for m in moves:
         flag = "MOVING" if abs(m["pct"]) >= move_pct else ""
         when = (" at %s Cairo" % to_local(m["time"]).strftime("%H:%M")) if m.get("time") else ""
-        late = " (15 min late)" if m.get("delay_seconds") else ""
+        late = E.delay_phrase(m.get("delay_seconds") or 0)
         out.append("%-6s EGP %s %+.2f%% vs yesterday's close %s%s%s  %s" % (
             m["ticker"], _px(m["price"]), m["pct"], _px(m["prev_close"]), when, late, flag))
     return out
